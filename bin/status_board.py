@@ -100,8 +100,10 @@ def cmd_init(args) -> int:
         print("[board] pin failed (bot may lack Manage Messages); continuing", file=sys.stderr)
     for a in state["agents"]:
         if a.get("thread_id"): continue
-        thread = req("POST", f"/channels/{channel}/messages/{msg['id']}/threads",
-                     {"name": f"{a['name']}", "auto_archive_duration": 10080})  # 7 days
+        # Standalone public thread (type 11). A message can only have ONE attached
+        # thread, so we cannot hang all agent threads off the status-board message.
+        thread = req("POST", f"/channels/{channel}/threads",
+                     {"name": a["name"], "type": 11, "auto_archive_duration": 10080})  # 7 days
         a["thread_id"] = thread["id"]
         req("POST", f"/channels/{a['thread_id']}/messages",
             {"content": f"**{a['name']}** — {a.get('role','?')} · `{a.get('model','?')}`\n"
