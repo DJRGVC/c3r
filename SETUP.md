@@ -44,7 +44,11 @@ In your Discord server:
 
 1. Go to https://discord.com/developers/applications → **New Application**
 2. Sidebar → **Bot** → **Add Bot** → copy the bot token
-3. Sidebar → **OAuth2** → **URL Generator**:
+3. Sidebar → **Bot** → scroll to **Privileged Gateway Intents** →
+   enable **Message Content Intent** → **Save Changes**.
+   ⚠ Without this, your Discord thread replies will arrive with empty content
+   and the listener will silently drop them.
+4. Sidebar → **OAuth2** → **URL Generator**:
    - Scopes: `bot`
    - Bot permissions:
      - View Channel
