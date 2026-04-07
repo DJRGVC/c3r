@@ -536,7 +536,11 @@ cmd_init() {
         echo
         info "Agent $i of $n_agents"
         local name role model focus
-        name=$(ask "  name [agent$i]: " "agent$i")
+        while :; do
+            name=$(ask "  name [agent$i] (letters/digits/dash/underscore only): " "agent$i")
+            if [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then break; fi
+            warn "invalid — spaces and special chars not allowed in a git branch name"
+        done
         echo "  Role templates: generic | literature | coding | writing | custom"
         role=$(ask "  role [generic]: " "generic")
         echo "  Models: sonnet (default) | opus | haiku"
