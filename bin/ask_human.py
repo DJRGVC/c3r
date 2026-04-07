@@ -59,15 +59,16 @@ def _req(method: str, path: str, token: str, body: dict | None = None) -> dict |
                 return None
             return json.loads(raw)
     except urllib.error.HTTPError as e:
-        # Surface rate-limit info if present
         err_body = e.read().decode(errors="replace")
-        print(f"[ask_human] HTTP {e.code} on {method} {path}: {err_body}", file=sys.stderr)
         if e.code == 429:
+            # Expected under heavy polling — back off silently, caller will retry next tick.
             try:
                 retry = json.loads(err_body).get("retry_after", 2)
                 time.sleep(float(retry) + 0.5)
             except Exception:
                 time.sleep(2)
+        else:
+            print(f"[ask_human] HTTP {e.code} on {method} {path}: {err_body}", file=sys.stderr)
         raise
 
 
@@ -79,6 +80,11 @@ def send_message(token: str, channel_id: str, content: str) -> str:
 def add_reaction(token: str, channel_id: str, message_id: str, emoji: str) -> None:
     safe = urllib.parse.quote(emoji)
     _req("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{safe}/@me", token)
+
+
+def get_message(token: str, channel_id: str, message_id: str) -> dict:
+    resp = _req("GET", f"/channels/{channel_id}/messages/{message_id}", token)
+    return resp or {}  # type: ignore[return-value]
 
 
 def get_reaction_users(token: str, channel_id: str, message_id: str, emoji: str) -> list[dict]:
@@ -98,7 +104,7 @@ def get_recent_messages(token: str, channel_id: str, after_id: str | None) -> li
 # ---------- Modes ----------
 
 def free_text(token: str, channel_id: str, user_id: str, question: str, deadline: float) -> str:
-    header_id = send_message(token, channel_id, f"**Claude needs input**\n> {question}\n\n*Reply in this channel. Timeout: {int((deadline - time.time()) / 60)} min.*")
+    header_id = send_message(token, channel_id, f"> {question}\n\n*Reply here. Timeout: {int((deadline - time.time()) / 60)} min.*")
     while time.time() < deadline:
         msgs = get_recent_messages(token, channel_id, after_id=header_id)
         # Discord returns newest first when paginating by after; filter to user, pick oldest new
@@ -113,7 +119,7 @@ def free_text(token: str, channel_id: str, user_id: str, question: str, deadline
 
 
 def _render_choices(question: str, choices: list[str], multi: bool) -> str:
-    lines = ["**Claude needs input**", f"> {question}", ""]
+    lines = [f"> {question}", ""]
     for i, c in enumerate(choices):
         lines.append(f"{LETTER_EMOJI[i]}  {c}")
     lines.append("")
@@ -146,25 +152,36 @@ def choice_mode(
         add_reaction(token, channel_id, msg_id, SUBMIT_EMOJI)
 
     selected: set[int] = set()
+    emoji_idx = {e: i for i, e in enumerate(emojis)}
     while time.time() < deadline:
         try:
-            if not multi:
-                for idx, e in enumerate(emojis):
-                    users = get_reaction_users(token, channel_id, msg_id, e)
-                    if any(u.get("id") == user_id for u in users):
+            msg = get_message(token, channel_id, msg_id)
+            # message.reactions is a list of {emoji:{name}, count, me:bool} objects.
+            # It only tells us *whether* user_id voted if we fetch that reaction's user list,
+            # but message.reactions excludes the bot's own preseed when we check count > 1.
+            candidates = []
+            submit_hit = False
+            for r in msg.get("reactions") or []:
+                name = (r.get("emoji") or {}).get("name", "")
+                if r.get("count", 0) > 1:  # >1 means at least one non-bot voter
+                    if name in emoji_idx:
+                        candidates.append(name)
+                    elif name == SUBMIT_EMOJI:
+                        submit_hit = True
+            # For any candidate, do one user-list fetch to confirm it's *our* user.
+            for name in candidates:
+                users = get_reaction_users(token, channel_id, msg_id, name)
+                if any(u.get("id") == user_id for u in users):
+                    idx = emoji_idx[name]
+                    if not multi:
                         return choices[idx]
-            else:
-                # Check submit first; if pressed, freeze current selection
-                submit_users = get_reaction_users(token, channel_id, msg_id, SUBMIT_EMOJI)
-                submitted = any(u.get("id") == user_id for u in submit_users)
-                for idx, e in enumerate(emojis):
-                    users = get_reaction_users(token, channel_id, msg_id, e)
-                    if any(u.get("id") == user_id for u in users):
-                        selected.add(idx)
-                if submitted and selected:
+                    selected.add(idx)
+            if multi and submit_hit and selected:
+                users = get_reaction_users(token, channel_id, msg_id, SUBMIT_EMOJI)
+                if any(u.get("id") == user_id for u in users):
                     return " | ".join(choices[i] for i in sorted(selected))
         except urllib.error.HTTPError:
-            pass  # already logged; retry next tick
+            pass  # already logged on first 429; retry next tick
         time.sleep(POLL_INTERVAL)
     return TIMEOUT_SENTINEL
 
