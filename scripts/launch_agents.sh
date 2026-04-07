@@ -1,37 +1,66 @@
 #!/usr/bin/env bash
-# launch_agents.sh — tmux session with two Ralph agents + a live log window.
-# Usage: launch_agents.sh <target-repo-path> [agent-a] [agent-b]
+# launch_agents.sh — tmux session with one window per agent + a logs window.
+#
+# Reads agent list from the project's state.json (one window per agent).
+# Each window runs bin/agent_loop.sh with the right env.
+#
+# Usage: launch_agents.sh <target-repo>
 set -euo pipefail
 
-REPO="${1:?Usage: launch_agents.sh <target-repo> [agent-a] [agent-b]}"
-A_NAME="${2:-policy}"
-B_NAME="${3:-perception}"
-SESSION="${C3R_TMUX_SESSION:-c3r}"
+REPO="${1:?Usage: launch_agents.sh <target-repo>}"
+REPO="$(cd "$REPO" && pwd)"
+STATE="$REPO/.c3r/state.json"
+[ -f "$STATE" ] || { echo "[launch] missing $STATE — run 'c3r init' first" >&2; exit 1; }
 
-PARENT="$(dirname "$REPO")"
-REPO_NAME="$(basename "$REPO")"
-A_WT="$PARENT/${REPO_NAME}-${A_NAME}"
-B_WT="$PARENT/${REPO_NAME}-${B_NAME}"
-
-for wt in "$A_WT" "$B_WT"; do
-    [ -d "$wt" ] || { echo "[launch] missing worktree $wt — run setup_worktrees.sh first" >&2; exit 1; }
-done
-
-# Require Discord env (agents will need it for ask_human.py).
 : "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN}"
 : "${DISCORD_CHANNEL_ID:?set DISCORD_CHANNEL_ID}"
 : "${DISCORD_USER_ID:?set DISCORD_USER_ID}"
 
+C3R_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+export C3R_DIR
+export C3R_BIN="$C3R_DIR/bin"
+
+PROJECT_NAME="$(python3 -c "import json;print(json.load(open('$STATE'))['project'])")"
+SESSION="c3r-${PROJECT_NAME}"
+
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "[launch] session $SESSION already exists; attach with: tmux attach -t $SESSION" >&2
+    echo "[launch] session '$SESSION' already exists; attach with: tmux attach -t $SESSION" >&2
     exit 0
 fi
 
-RALPH_CMD="${C3R_RALPH_CMD:-ralph --monitor}"
+# Read agents list from state.json → newline-separated "name worktree thread_id"
+mapfile -t AGENTS < <(python3 -c "
+import json
+for a in json.load(open('$STATE'))['agents']:
+    print(f\"{a['name']}\t{a['worktree']}\t{a.get('thread_id','')}\")
+")
+[ "${#AGENTS[@]}" -gt 0 ] || { echo "[launch] no agents in state.json" >&2; exit 1; }
 
-tmux new-session  -d -s "$SESSION" -n "$A_NAME"    -c "$A_WT" "$RALPH_CMD"
-tmux new-window   -t "$SESSION"    -n "$B_NAME"    -c "$B_WT" "$RALPH_CMD"
-tmux new-window   -t "$SESSION"    -n "logs"       -c "$REPO" \
-    "tail -F '$A_WT/.ralph/RESEARCH_LOG.md' '$B_WT/.ralph/RESEARCH_LOG.md' 2>/dev/null || bash"
+first=1
+for line in "${AGENTS[@]}"; do
+    IFS=$'\t' read -r name worktree thread <<<"$line"
+    env_cmd="cd '$worktree' && \
+        export C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$STATE' \
+        C3R_AGENT_NAME='$name' C3R_WORKTREE='$worktree' \
+        C3R_AGENT_THREAD_ID='$thread' \
+        DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' \
+        DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' \
+        DISCORD_USER_ID='$DISCORD_USER_ID' && \
+        '$C3R_BIN/agent_loop.sh'"
+    if [ "$first" = 1 ]; then
+        tmux new-session -d -s "$SESSION" -n "$name" "bash -lc \"$env_cmd\""
+        first=0
+    else
+        tmux new-window -t "$SESSION" -n "$name" "bash -lc \"$env_cmd\""
+    fi
+done
+
+# Logs window: tail every agent's RESEARCH_LOG.md
+tail_args=""
+for line in "${AGENTS[@]}"; do
+    IFS=$'\t' read -r _ worktree _ <<<"$line"
+    tail_args+="'$worktree/.c3r/RESEARCH_LOG.md' "
+done
+tmux new-window -t "$SESSION" -n "logs" "bash -lc \"tail -F $tail_args 2>/dev/null || bash\""
 
 echo "[launch] session '$SESSION' up. Attach: tmux attach -t $SESSION"

@@ -1,0 +1,11 @@
+# Per-agent config, sourced by agent_loop.sh before each iteration.
+# All fields set by `c3r init` / `c3r add-agent`; edit to tune.
+
+AGENT_NAME="policy"
+AGENT_ROLE="generic"
+AGENT_MODEL="claude-sonnet-4-6"        # claude-sonnet-4-6 | claude-opus-4-6 | claude-haiku-4-5-20251001
+ITERATION_COOLDOWN_SEC=20               # delay between iterations
+MAX_CONSECUTIVE_FAILURES=5              # circuit breaker
+CONTEXT_ALERT_THRESHOLDS="25 50 75 100" # % of 200k window
+# Discord thread for this agent (set by c3r init after thread creation)
+C3R_AGENT_THREAD_ID=""

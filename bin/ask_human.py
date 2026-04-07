@@ -177,6 +177,7 @@ def main() -> int:
     p.add_argument("--choices", nargs="+", help="Enumerated options; triggers reaction poll mode")
     p.add_argument("--multi", action="store_true", help="Allow multi-select (requires --choices)")
     p.add_argument("--timeout-min", type=int, default=DEFAULT_TIMEOUT_MIN)
+    p.add_argument("--thread", help="Thread ID to post in (default: $C3R_AGENT_THREAD_ID or main channel)")
     args = p.parse_args()
 
     if args.multi and not args.choices:
@@ -189,11 +190,14 @@ def main() -> int:
         print("[ask_human] Missing DISCORD_BOT_TOKEN / DISCORD_CHANNEL_ID / DISCORD_USER_ID", file=sys.stderr)
         return 2
 
+    # Posts land in the agent's thread when available, else the main channel.
+    target_id = args.thread or os.environ.get("C3R_AGENT_THREAD_ID") or channel_id
+
     deadline = time.time() + args.timeout_min * 60
     if args.choices:
-        answer = choice_mode(token, channel_id, user_id, args.question, args.choices, args.multi, deadline)
+        answer = choice_mode(token, target_id, user_id, args.question, args.choices, args.multi, deadline)
     else:
-        answer = free_text(token, channel_id, user_id, args.question, deadline)
+        answer = free_text(token, target_id, user_id, args.question, deadline)
 
     print(answer)
     return 0

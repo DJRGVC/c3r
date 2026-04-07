@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# setup_worktrees.sh — create two git worktrees for concurrent research agents.
-# Usage: setup_worktrees.sh <target-repo-path> [agent-a] [agent-b]
+# setup_worktrees.sh — create one git worktree per agent.
+# Usage: setup_worktrees.sh <target-repo> <agent-name> [agent-name ...]
 set -euo pipefail
 
-REPO="${1:?Usage: setup_worktrees.sh <target-repo> [agent-a-name] [agent-b-name]}"
-A_NAME="${2:-policy}"
-B_NAME="${3:-perception}"
+REPO="${1:?Usage: setup_worktrees.sh <target-repo> <agent-name> [agent-name ...]}"
+shift
+[ "$#" -ge 1 ] || { echo "need at least one agent name" >&2; exit 1; }
 
 cd "$REPO"
 git rev-parse --is-inside-work-tree >/dev/null
@@ -14,7 +14,7 @@ BASE="$(git symbolic-ref --short HEAD)"
 PARENT="$(dirname "$REPO")"
 REPO_NAME="$(basename "$REPO")"
 
-for name in "$A_NAME" "$B_NAME"; do
+for name in "$@"; do
     branch="agent/$name"
     wt="$PARENT/${REPO_NAME}-${name}"
     if git show-ref --verify --quiet "refs/heads/$branch"; then
