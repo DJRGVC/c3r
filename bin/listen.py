@@ -24,6 +24,7 @@ from pathlib import Path
 
 API = "https://discord.com/api/v10"
 POLL_INTERVAL = 4.0
+VERBOSE = os.environ.get("C3R_LISTEN_VERBOSE", "0") == "1"
 C3R_BIN = Path(os.path.realpath(__file__)).parent
 C3R_DIR = C3R_BIN.parent
 
@@ -112,12 +113,18 @@ def main() -> int:
     if not state_path or not os.path.isfile(state_path):
         print("[listen] missing C3R_STATE", file=sys.stderr); return 2
     channel = os.environ["DISCORD_CHANNEL_ID"]
-    bot_id = req("GET", "/users/@me")["id"]
+    me = req("GET", "/users/@me")
+    if not me:
+        print("[listen] FATAL: could not fetch bot identity", file=sys.stderr); return 1
+    bot_id = me["id"]
 
     last_channel_id = None  # last seen message id in main channel
     last_thread_ids: dict[str, str] = {}  # thread_id -> last message id
 
-    print("[listen] up", file=sys.stderr)
+    print(f"[listen] up — bot_id={bot_id} channel={channel}", file=sys.stderr)
+    state0 = load_state(state_path)
+    for a in state0.get("agents", []):
+        print(f"[listen]   agent {a['name']} → thread {a.get('thread_id')} worktree {a['worktree']}", file=sys.stderr)
     while True:
         try:
             state = load_state(state_path)
@@ -138,16 +145,20 @@ def main() -> int:
                 tid = a.get("thread_id")
                 if not tid: continue
                 after = last_thread_ids.get(tid)
-                q = f"?limit=10" + (f"&after={after}" if after else "")
+                q = f"?limit=20" + (f"&after={after}" if after else "")
                 tmsgs = req("GET", f"/channels/{tid}/messages{q}") or []
+                if VERBOSE:
+                    print(f"[listen] poll {a['name']} thread={tid} after={after} got={len(tmsgs)}", file=sys.stderr)
                 tmsgs.sort(key=lambda m: int(m["id"]))
                 for m in tmsgs:
                     last_thread_ids[tid] = m["id"]
-                    if m["author"]["id"] == bot_id: continue
+                    author_id = m["author"]["id"]
                     content = (m.get("content") or "").strip()
+                    if VERBOSE:
+                        print(f"[listen]   msg id={m['id']} author={author_id} bot={author_id==bot_id} content={content[:60]!r}", file=sys.stderr)
+                    if author_id == bot_id: continue
                     if not content: continue
                     append_inbox(a["worktree"], m["author"].get("global_name") or m["author"]["username"], content)
-                    # ✓ reaction to acknowledge receipt
                     try:
                         req("PUT", f"/channels/{tid}/messages/{m['id']}/reactions/{urllib.parse.quote('✅')}/@me")
                     except Exception: pass
