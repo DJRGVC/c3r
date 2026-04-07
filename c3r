@@ -741,7 +741,7 @@ cmd_launch() {
 cmd_watch() {
     local target; target="$(cd "${1:-$PWD}" && pwd)"
     local state; state="$(require_state "$target")"
-    local interval="${2:-3}"
+    local interval="${2:-1}"
     # Hide cursor, restore on exit
     printf '\e[?25l'
     trap 'printf "\e[?25h\n"; exit 0' INT TERM EXIT
@@ -880,8 +880,41 @@ for a in s["agents"]:
     if os.path.exists(log):
         # Only show lines that look like real entries (skip header/separator)
         all_lines = [l for l in open(log).read().splitlines() if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
-        for ln in all_lines[-3:]: print(f"      {ln}")
-        if not all_lines: print(f"      (no log entries yet)")
+        for ln in all_lines[-3:]: print(f"      {ln[:cols-6]}")
+        if not all_lines: print(f"      {DIM}(no log entries yet){RESET}")
+
+# ---- Inbox panel ----
+print(bar)
+print(f"{BOLD}INBOX{RESET}  {DIM}(unread → agent hasn't read it yet · read → moved to archive){RESET}")
+any_inbox = False
+for a in s["agents"]:
+    inbox = os.path.join(a["worktree"], ".c3r/INBOX.md")
+    archive = os.path.join(a["worktree"], ".c3r/INBOX_ARCHIVE.md")
+    # Unread: content in INBOX.md that isn't the empty placeholder
+    unread = ""
+    if os.path.exists(inbox):
+        raw = open(inbox).read()
+        body = "\n".join(l for l in raw.splitlines() if l.strip() and not l.startswith("#") and "<!-- empty -->" not in l)
+        if body.strip():
+            # first non-header, non-separator line
+            msg_lines = [l for l in body.splitlines() if l.strip() and l.strip() != "---" and not l.startswith("**")]
+            unread = (msg_lines[-1] if msg_lines else body.splitlines()[-1])[:cols-30]
+    # Read (last archive entry)
+    last_archived = ""
+    if os.path.exists(archive):
+        arc = open(archive).read().strip()
+        if arc:
+            msg_lines = [l for l in arc.splitlines() if l.strip() and l.strip() != "---" and not l.startswith("**") and not l.startswith("#")]
+            if msg_lines:
+                last_archived = msg_lines[-1][:cols-30]
+    if unread:
+        any_inbox = True
+        print(f"  {YELLOW}📬 {a['name']:<10}{RESET} {BOLD}UNREAD{RESET}  {unread}")
+    elif last_archived:
+        any_inbox = True
+        print(f"  {GREEN}✉  {a['name']:<10}{RESET} {DIM}read   {last_archived}{RESET}")
+if not any_inbox:
+    print(f"  {DIM}(no inbox messages — send one with: c3r ping <agent> <message>){RESET}")
 PY
     "$C3R_BIN/status_board.py" update --state "$state" || true
 }
