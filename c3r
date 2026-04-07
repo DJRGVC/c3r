@@ -805,6 +805,41 @@ for a in s["agents"]:
     print(f"  {icon} {a['name']:<12} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
 print(bar)
 
+# ---- INBOX panel (always visible, above log snippets) ----
+import re
+def parse_msgs(path, status):
+    if not os.path.exists(path): return []
+    text = open(path).read()
+    out = []
+    for m in re.finditer(r'\*\*([^*]+)\*\*\s*·\s*([^\n]*)\n\n(.+?)(?=\n---|\Z)', text, re.DOTALL):
+        author, ts, body = m.groups()
+        first = body.strip().splitlines()[0] if body.strip() else ""
+        out.append({"status": status, "author": author.strip(), "ts": ts.strip(), "body": first})
+    return out
+
+all_msgs = []
+for a in s["agents"]:
+    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX.md"), "unread"):
+        msg["agent"] = a["name"]; all_msgs.append(msg)
+    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX_ARCHIVE.md"), "read"):
+        msg["agent"] = a["name"]; all_msgs.append(msg)
+all_msgs.sort(key=lambda m: m["ts"], reverse=True)
+
+print(f"{BOLD}INBOX{RESET}  {DIM}(latest 5 · 📬 unread, ✉ read){RESET}")
+if not all_msgs:
+    print(f"  {DIM}(no messages yet — send via CLI: c3r ping <agent> <msg>  or reply in a Discord thread){RESET}")
+else:
+    for msg in all_msgs[:5]:
+        if msg["status"] == "unread":
+            icon, col, lbl = "📬", YELLOW, "UNREAD"
+        else:
+            icon, col, lbl = "✉", GREEN, "read  "
+        tag = f"→{msg['agent']}"
+        body = msg["body"][: cols - 36]
+        print(f"  {col}{icon} {lbl}{RESET}  {BOLD}{tag:<12}{RESET}  {body}")
+        print(f"               {DIM}{msg['ts']}  from {msg['author']}{RESET}")
+print(bar)
+
 # Last 2 log lines per agent
 for a in s["agents"]:
     log = os.path.join(a["worktree"], ".c3r/RESEARCH_LOG.md")
@@ -899,45 +934,8 @@ for a in s["agents"]:
     if os.path.exists(log):
         # Only show lines that look like real entries (skip header/separator)
         all_lines = [l for l in open(log).read().splitlines() if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
-        for ln in all_lines[-3:]: print(f"      {ln[:cols-6]}")
-        if not all_lines: print(f"      {DIM}(no log entries yet){RESET}")
-
-# ---- Inbox stream panel ----
-import re
-def parse_msgs(path, status):
-    if not os.path.exists(path): return []
-    text = open(path).read()
-    out = []
-    for m in re.finditer(r'\*\*([^*]+)\*\*\s*·\s*([^\n]*)\n\n(.+?)(?=\n---|\Z)', text, re.DOTALL):
-        author, ts, body = m.groups()
-        first = body.strip().splitlines()[0] if body.strip() else ""
-        out.append({"status": status, "author": author.strip(), "ts": ts.strip(), "body": first})
-    return out
-
-all_msgs = []
-for a in s["agents"]:
-    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX.md"), "unread"):
-        msg["agent"] = a["name"]; all_msgs.append(msg)
-    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX_ARCHIVE.md"), "read"):
-        msg["agent"] = a["name"]; all_msgs.append(msg)
-
-# Newest first
-all_msgs.sort(key=lambda m: m["ts"], reverse=True)
-
-print(bar)
-print(f"{BOLD}INBOX{RESET}  {DIM}(latest 5 messages; 📬 unread = agent hasn't seen it yet, ✉ read = archived by agent){RESET}")
-if not all_msgs:
-    print(f"  {DIM}(no messages yet — send via CLI: c3r ping <agent> <msg>  or reply in a Discord thread){RESET}")
-else:
-    for msg in all_msgs[:5]:
-        if msg["status"] == "unread":
-            icon, col, lbl = "📬", YELLOW, "UNREAD"
-        else:
-            icon, col, lbl = "✉", GREEN, "read  "
-        tag = f"→{msg['agent']}"
-        body = msg["body"][: cols - 30]
-        print(f"  {col}{icon} {lbl}{RESET}  {BOLD}{tag:<12}{RESET}  {body}")
-        print(f"               {DIM}{msg['ts']}  from {msg['author']}{RESET}")
+        for ln in all_lines[-3:]: print(f"      {ln}")
+        if not all_lines: print(f"      (no log entries yet)")
 PY
     "$C3R_BIN/status_board.py" update --state "$state" || true
 }
