@@ -1,29 +1,17 @@
 #!/usr/bin/env bash
 # c3r — Continuous Context Claude Research CLI
-#
-# Subcommands:
-#   c3r init [target-repo]   Interactive wizard: Discord setup, smoke test,
-#                            worktree creation, .ralph/ seeding.
-#   c3r launch [target-repo] Launch the tmux session with both agents.
-#   c3r stop [session]       Kill the tmux session.
-#   c3r doctor               Check env, config, ralph install, Discord reachability.
-#   c3r config               Show the saved config file path and contents.
-#   c3r install              Symlink `c3r` into ~/.local/bin so it's on PATH.
-#   c3r help                 This message.
-#
-# Config is persisted to ~/.config/c3r/config.env and auto-sourced on every run.
+# See `c3r help` for an overview or `c3r help <command>` for details.
 set -euo pipefail
 
-# --- paths ---
 C3R_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+C3R_BIN="$C3R_DIR/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/c3r"
 CONFIG_FILE="$CONFIG_DIR/config.env"
 
-# --- colors ---
 if [ -t 1 ]; then
-    BOLD=$'\e[1m'; DIM=$'\e[2m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; RESET=$'\e[0m'
+    BOLD=$'\e[1m'; DIM=$'\e[2m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; BLUE=$'\e[34m'; RESET=$'\e[0m'
 else
-    BOLD=""; DIM=""; GREEN=""; YELLOW=""; RED=""; RESET=""
+    BOLD=""; DIM=""; GREEN=""; YELLOW=""; RED=""; BLUE=""; RESET=""
 fi
 
 info()  { echo "${BOLD}[c3r]${RESET} $*"; }
@@ -32,19 +20,14 @@ warn()  { echo "${YELLOW}[c3r] ⚠${RESET} $*" >&2; }
 die()   { echo "${RED}[c3r] ✗${RESET} $*" >&2; exit 1; }
 ask()   { local prompt="$1" default="${2:-}" var; read -rp "$prompt" var; echo "${var:-$default}"; }
 
-# --- config persistence ---
 load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        # shellcheck disable=SC1090
-        set -a; . "$CONFIG_FILE"; set +a
-    fi
+    [ -f "$CONFIG_FILE" ] && { set -a; . "$CONFIG_FILE"; set +a; } || true
 }
 
 save_config() {
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" <<EOF
-# c3r config — auto-sourced by the c3r CLI.
-# chmod 600; contains secrets.
+# c3r config — auto-sourced by the c3r CLI. chmod 600; contains secrets.
 export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 export DISCORD_CHANNEL_ID="${DISCORD_CHANNEL_ID:-}"
 export DISCORD_USER_ID="${DISCORD_USER_ID:-}"
@@ -53,228 +36,959 @@ EOF
     ok "saved config → $CONFIG_FILE"
 }
 
-# --- subcommand: install ---
+# Resolve target project: explicit arg > $PWD if it has .c3r/state.json > $PWD if it's a git repo
+resolve_target() {
+    local arg="${1:-}"
+    if [ -n "$arg" ]; then cd "$arg" && git rev-parse --show-toplevel 2>/dev/null || echo "$arg"; return; fi
+    if [ -f "$PWD/.c3r/state.json" ]; then echo "$PWD"; return; fi
+    git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD"
+}
+
+state_path() { echo "$1/.c3r/state.json"; }
+
+require_state() {
+    local s; s="$(state_path "$1")"
+    [ -f "$s" ] || die "no project state at $s — run 'c3r init' in that repo first"
+    echo "$s"
+}
+
+# Small Python helper for JSON state mutations. Usage: py_state <script>
+py_state() {
+    python3 - "$@"
+}
+
+# ------------------------------------------------------------------
+# HELP
+# ------------------------------------------------------------------
+cmd_help() {
+    local topic="${1:-}"
+    case "$topic" in
+    ""|overview)
+        cat <<EOF
+${BOLD}c3r${RESET} — Continuous Context Claude Research
+
+Run two-or-more Claude Code research agents in parallel on a local project,
+with Discord threads as the human-in-the-loop interface and git worktrees
+keeping the agents from stepping on each other.
+
+${BOLD}USAGE${RESET}
+  c3r <command> [args]
+  c3r help <command>      detailed help for one command
+
+${BOLD}SETUP${RESET}
+  install                 symlink c3r into ~/.local/bin
+  init [path]             interactive project setup wizard
+  doctor                  verify env, Discord bot, tools
+  config                  show the saved config file
+
+${BOLD}RUNNING${RESET}
+  launch [path]           start the tmux session with all agents
+  stop [path]             kill the tmux session (non-destructive)
+  pause [path]            pause all agents cooperatively
+  resume [path]           resume paused agents
+  status [path]           print local status + nudge Discord board
+
+${BOLD}AGENT MANAGEMENT${RESET}
+  add-agent [path] ...    add a new agent to an existing project
+  reset [path] <name>     delete an agent's worktree + branch (destructive)
+  logs [path] [agent]     tail RESEARCH_LOG.md for one or all agents
+
+${BOLD}HUMAN ↔ AGENT${RESET}
+  ping [path] <agent> <msg>    send a message to an agent's INBOX
+  ask "question" [--choices]   send yourself a Discord question (test harness)
+  listen [path]                 start the Discord → INBOX listener (auto-run by launch)
+  board [path] (bump|update)    manage the persistent Discord status board
+
+${BOLD}MAINTENANCE${RESET}
+  update                  git pull c3r itself (template/tool updates)
+  uninstall               remove ~/.local/bin symlink (keeps config)
+  help [command]          this message, or detailed help
+
+${BOLD}DISCORD COMMANDS${RESET} (type these in the project channel)
+  !c3r help               list commands
+  !c3r status             bump the status board
+  !c3r pause / resume     same as CLI
+  !c3r ping <agent> <msg> same as CLI ping
+
+Config file: $CONFIG_FILE
+Templates:   $C3R_DIR/templates/
+EOF
+        ;;
+
+    init) cat <<'EOF'
+c3r init [TARGET_REPO]
+
+Interactive wizard that wires c3r into a target git repo:
+  1. Confirms the target is a git repo.
+  2. Asks how many agents to create (default 2), and per-agent:
+       - name (e.g. policy, perception, literature)
+       - role template (generic | literature | coding | writing | custom)
+       - one-sentence focus (substituted into the PROMPT.md template)
+       - model (claude-sonnet-4-6 [default] | claude-opus-4-6 | claude-haiku-4-5-20251001)
+  3. Asks whether the GPU lock should be serial (flock) or none.
+  4. Collects Discord bot token, channel ID, user ID (one-time; saved to
+     ~/.config/c3r/config.env with chmod 600). If already saved, offers to reuse.
+  5. Runs a Discord round-trip smoke test (free-text + MCQ poll).
+  6. Creates git worktrees: <parent>/<repo>-<agent> on branch agent/<name>.
+  7. Seeds each worktree's .c3r/ with PROMPT.md, fix_plan.md, RESEARCH_LOG.md,
+     INBOX.md, agent.conf.
+  8. Writes the project state file at <target>/.c3r/state.json.
+  9. Posts the persistent status board in your Discord channel and creates
+     one thread per agent. Writes thread IDs back into state.json.
+ 10. Symlinks $C3R_DIR/bin into <target>/scripts/c3r so agents can call tools
+     at ./scripts/c3r/ask_human.py etc.
+
+Before running: create a dedicated Discord channel for this project (e.g.
+#c3r-yourproject) and grant the bot permissions ONLY on that channel:
+  View Channel, Send Messages, Create Public Threads,
+  Send Messages in Threads, Read Message History, Add Reactions.
+
+The wizard does NOT launch agents — run `c3r launch` after init to start them.
+EOF
+        ;;
+    launch) cat <<'EOF'
+c3r launch [TARGET_REPO]
+
+Starts the tmux session for this project. Reads .c3r/state.json to know how
+many agents to start and where their worktrees live. One tmux window per
+agent runs bin/agent_loop.sh; a final window tails every agent's
+RESEARCH_LOG.md; an additional window runs bin/listen.py so Discord-thread
+replies land in the right agent's INBOX.md.
+
+Session name is "c3r-<project>". Attach with:
+  tmux attach -t c3r-<project>
+
+If the session already exists, this is a no-op. Use `c3r stop` to kill it.
+
+This command depends on DISCORD_* env vars (auto-sourced from the config).
+EOF
+        ;;
+    stop) cat <<'EOF'
+c3r stop [TARGET_REPO]
+
+Kills the tmux session for this project. Non-destructive:
+  - worktrees are left intact
+  - no branches or commits are touched
+  - state.json is left intact
+  - Discord status board and threads remain in place
+
+A tmux kill interrupts any in-flight claude -p call cleanly and terminates
+any GPU workload that agents had launched. If you want to pause without
+interrupting an in-flight training run, use `c3r pause` instead.
+EOF
+        ;;
+    pause) cat <<'EOF'
+c3r pause [TARGET_REPO]
+
+Pauses all agents cooperatively: writes a PAUSED flag in each worktree's
+.c3r/ dir. Agents check this flag between iterations and spin-sleep rather
+than starting a new iteration. Any in-flight iteration (including a running
+training job) is allowed to finish first — nothing is killed.
+
+Also updates state.json ("paused": true) and redraws the status board.
+
+Resume with `c3r resume`.
+EOF
+        ;;
+    resume) cat <<'EOF'
+c3r resume [TARGET_REPO]
+
+Removes the PAUSED flag from all agent worktrees and flips state.json back
+to paused: false. Agents that are currently spin-sleeping will pick up the
+next iteration within ~15 seconds.
+EOF
+        ;;
+    status) cat <<'EOF'
+c3r status [TARGET_REPO]
+
+Prints a local-side summary:
+  - tmux session up/down
+  - each agent's branch, last iter, last context %, pause state
+  - GPU lock holder (if any)
+  - last 3 entries of each agent's RESEARCH_LOG.md
+
+Also forces a re-render of the persistent Discord status board.
+EOF
+        ;;
+    logs) cat <<'EOF'
+c3r logs [TARGET_REPO] [AGENT_NAME]
+
+Tails .c3r/RESEARCH_LOG.md for the named agent, or for all agents if no name
+is given. Equivalent to attaching the tmux "logs" window but works without
+tmux and can be piped/grep'd.
+
+Ctrl-C to stop.
+EOF
+        ;;
+    ask) cat <<'EOF'
+c3r ask "QUESTION" [--choices opt1 opt2 ...] [--multi] [--thread ID]
+
+Thin wrapper around bin/ask_human.py for testing or for sending yourself a
+prompt from the CLI. Prints the reply on stdout (or TIMEOUT_NO_HUMAN_RESPONSE
+after 15 min). Useful for:
+  - smoke-testing the Discord bridge after editing the bot config
+  - scripting: pipe the reply into another tool
+EOF
+        ;;
+    ping) cat <<'EOF'
+c3r ping [TARGET_REPO] AGENT_NAME MESSAGE...
+
+Writes MESSAGE to the named agent's .c3r/INBOX.md (with a timestamp and
+"you (cli)" author tag). The agent reads its INBOX at the start of every
+iteration and acts on the contents.
+
+Equivalent to replying in the agent's Discord thread. Use this from your
+laptop; use the Discord thread on your phone.
+
+Example:
+  c3r ping policy "try the sigma curriculum from the Portela 2025 paper next"
+EOF
+        ;;
+    add-agent) cat <<'EOF'
+c3r add-agent [TARGET_REPO] NAME [--role ROLE] [--model MODEL] [--focus "..."]
+
+Adds a new agent to an existing project:
+  1. Creates a new git worktree + branch (agent/NAME)
+  2. Seeds its .c3r/ dir from the chosen role template
+  3. Appends the agent to state.json
+  4. Creates a new Discord thread off the status board for the agent
+  5. Updates the status board
+
+Does NOT auto-launch — restart the tmux session with `c3r stop && c3r launch`
+to bring the new agent online, or manually run agent_loop.sh in a new window.
+
+Role defaults to generic. Model defaults to claude-sonnet-4-6.
+EOF
+        ;;
+    reset) cat <<'EOF'
+c3r reset [TARGET_REPO] AGENT_NAME
+
+DESTRUCTIVE. Removes an agent completely:
+  1. Confirms with y/N prompt.
+  2. Removes the git worktree (<parent>/<repo>-<name>)
+  3. Deletes the branch (agent/<name>)
+  4. Removes the agent entry from state.json
+  5. Archives the Discord thread (doesn't delete it — history is preserved)
+  6. Redraws the status board
+
+The agent's RESEARCH_LOG.md history survives in git reflog for a while; to
+recover it, check `git reflog show agent/<name>`.
+EOF
+        ;;
+    update) cat <<'EOF'
+c3r update
+
+Runs `git pull --ff-only` inside $C3R_DIR to fetch the latest c3r templates
+and tools. Because targets symlink (not copy) c3r/bin into their scripts/
+dir, tool updates propagate immediately. Template updates only affect newly
+added agents — existing agents keep the PROMPT.md they were seeded with.
+EOF
+        ;;
+    uninstall) cat <<'EOF'
+c3r uninstall
+
+Removes the ~/.local/bin/c3r symlink created by `c3r install`. Leaves:
+  - the config file at ~/.config/c3r/config.env
+  - the c3r repo itself at $C3R_DIR
+  - all target-project state and worktrees
+
+To fully remove, also delete the config dir manually:
+  rm -rf ~/.config/c3r && rm -rf $C3R_DIR
+EOF
+        ;;
+    doctor) cat <<'EOF'
+c3r doctor [TARGET_REPO]
+
+Runs environment and config checks:
+  - DISCORD_BOT_TOKEN / CHANNEL_ID / USER_ID are set
+  - tmux, flock, python3, git, claude CLI are all on PATH
+  - claude CLI is logged in (claude --version)
+  - Discord bot can post in the configured channel
+  - Discord bot can create threads (permission check)
+  - If a target is given: state.json is valid, worktrees exist
+
+Exits 0 if everything is fine, non-zero otherwise.
+EOF
+        ;;
+    config) cat <<'EOF'
+c3r config
+
+Shows the saved config file with secrets redacted. Config lives at:
+  $CONFIG_FILE
+
+To edit by hand: $EDITOR ~/.config/c3r/config.env
+To wipe and re-enter: delete the file and re-run `c3r init`.
+EOF
+        ;;
+    install) cat <<'EOF'
+c3r install
+
+Symlinks $C3R_DIR/c3r into ~/.local/bin/c3r so the command is on PATH.
+Creates ~/.local/bin if missing. If ~/.local/bin is not on your PATH, prints
+the line to add to your shell rc.
+
+After install, `c3r` is available from any directory.
+EOF
+        ;;
+    board) cat <<'EOF'
+c3r board [TARGET_REPO] (bump|update)
+
+Manage the persistent Discord status board message:
+  update  re-render in place (cheap; normally done automatically by heartbeat)
+  bump    delete and repost at the bottom of the channel — use when the board
+          has scrolled away and you want it visible again
+
+The bump command is also exposed as !c3r status in the Discord channel.
+EOF
+        ;;
+    listen) cat <<'EOF'
+c3r listen [TARGET_REPO]
+
+Starts the Discord listener in the foreground. The listener does two things:
+  1. Polls each agent's Discord thread for new replies and appends them to
+     that agent's .c3r/INBOX.md (with ✓ reaction as ack).
+  2. Polls the main channel for !c3r commands (pause, resume, status, ping,
+     help) and executes them.
+
+`c3r launch` auto-starts the listener in its own tmux window, so you
+normally don't need to run this directly. Useful for debugging or running
+the listener without the agent loops.
+EOF
+        ;;
+    *) die "no help topic for '$topic' — try 'c3r help'" ;;
+    esac
+}
+
+# ------------------------------------------------------------------
+# install / uninstall / config
+# ------------------------------------------------------------------
 cmd_install() {
     local bin_dir="$HOME/.local/bin"
     mkdir -p "$bin_dir"
     local link="$bin_dir/c3r"
-    if [ -L "$link" ] || [ -f "$link" ]; then
-        warn "$link already exists; overwriting"
-        rm -f "$link"
-    fi
+    [ -L "$link" ] || [ -f "$link" ] && { warn "$link exists; overwriting"; rm -f "$link"; }
     ln -s "$C3R_DIR/c3r" "$link"
     ok "symlinked $link → $C3R_DIR/c3r"
     case ":$PATH:" in
-        *":$bin_dir:"*) ok "$bin_dir is already on PATH" ;;
-        *) warn "add this to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+        *":$bin_dir:"*) ok "$bin_dir is on PATH" ;;
+        *) warn "add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
     esac
 }
 
-# --- subcommand: config ---
+cmd_uninstall() {
+    local link="$HOME/.local/bin/c3r"
+    if [ -L "$link" ]; then rm -f "$link"; ok "removed $link"
+    else warn "$link not present"; fi
+}
+
 cmd_config() {
     if [ -f "$CONFIG_FILE" ]; then
         echo "$CONFIG_FILE:"
-        sed 's/\(TOKEN="\)[^"]*"/\1***"/; s/\(ID="\)[0-9]\{6,\}/\1***/' "$CONFIG_FILE"
+        sed 's/\(TOKEN="\)[^"]*"/\1***"/; s/\(USER_ID="\)[0-9]\{6,\}"/\1***"/' "$CONFIG_FILE"
     else
-        warn "no config file yet; run: c3r init"
+        warn "no config yet — run: c3r init"
     fi
 }
 
-# --- subcommand: doctor ---
+# ------------------------------------------------------------------
+# doctor
+# ------------------------------------------------------------------
 cmd_doctor() {
-    local fails=0
     load_config
-
-    info "checking environment..."
+    local fails=0
+    info "environment"
     for v in DISCORD_BOT_TOKEN DISCORD_CHANNEL_ID DISCORD_USER_ID; do
         if [ -n "${!v:-}" ]; then ok "$v set"; else warn "$v not set"; fails=$((fails+1)); fi
     done
+    info "tools"
+    for tool in tmux flock python3 git claude jq; do
+        if command -v "$tool" >/dev/null; then ok "$tool → $(command -v "$tool")"
+        else warn "$tool missing"; [ "$tool" = jq ] || fails=$((fails+1)); fi
+    done
 
-    command -v tmux   >/dev/null && ok "tmux found"   || { warn "tmux missing";   fails=$((fails+1)); }
-    command -v flock  >/dev/null && ok "flock found"  || { warn "flock missing";  fails=$((fails+1)); }
-    command -v python3 >/dev/null && ok "python3 found" || { warn "python3 missing"; fails=$((fails+1)); }
-    command -v ralph  >/dev/null && ok "ralph found ($(command -v ralph))" \
-        || warn "ralph-claude-code not on PATH — install it before launching"
-
-    if [ "$fails" -eq 0 ]; then
-        ok "doctor: all checks passed"
-    else
-        warn "doctor: $fails issue(s) — fix before running 'c3r init' or 'c3r launch'"
-        return 1
+    if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
+        info "Discord bot reachability"
+        if python3 - <<PY
+import json, os, urllib.request
+req = urllib.request.Request(
+    f"https://discord.com/api/v10/channels/{os.environ['DISCORD_CHANNEL_ID']}",
+    headers={"Authorization": f"Bot {os.environ['DISCORD_BOT_TOKEN']}"},
+)
+try:
+    with urllib.request.urlopen(req, timeout=10) as r:
+        ch = json.load(r)
+    print(f"channel: #{ch.get('name','?')}  type={ch.get('type')}")
+except Exception as e:
+    print(f"ERROR: {e}"); raise SystemExit(1)
+PY
+        then ok "bot can read the channel"
+        else warn "bot cannot read the channel — check token & invite perms"; fails=$((fails+1)); fi
     fi
+
+    if [ "${1:-}" ]; then
+        local target; target="$(resolve_target "$1")"
+        if [ -f "$(state_path "$target")" ]; then
+            ok "project state found at $(state_path "$target")"
+        else
+            warn "no project state at $target"
+        fi
+    fi
+
+    [ "$fails" -eq 0 ] && ok "doctor: all checks passed" || { warn "doctor: $fails issue(s)"; return 1; }
 }
 
-# --- interactive Discord wizard ---
-wizard_discord() {
-    info "Discord bot setup"
+# ------------------------------------------------------------------
+# init wizard
+# ------------------------------------------------------------------
+
+wizard_discord_creds() {
+    info "Discord bot credentials"
     cat <<'EOF'
 
-Steps (roughly 5 minutes):
-  1. https://discord.com/developers/applications → New Application
-  2. Sidebar → Bot → Add Bot → copy the bot token
-  3. Sidebar → OAuth2 → URL Generator → scopes: bot
-     permissions: Send Messages, Read Message History, Add Reactions, View Channels
-  4. Open the generated URL → invite the bot to a server you control
-  5. In Discord: Settings → Advanced → enable Developer Mode
-  6. Right-click the target channel → Copy Channel ID
-  7. Right-click your own username → Copy User ID
+Steps (one-time, ~5 minutes):
+  1. https://discord.com/developers/applications → New Application → Bot
+  2. Copy the bot token
+  3. OAuth2 → URL Generator → scopes: bot
+     permissions: View Channel, Send Messages, Create Public Threads,
+                  Send Messages in Threads, Read Message History, Add Reactions
+  4. Open the generated URL → invite the bot to your server
+  5. In Discord: Settings → Advanced → Developer Mode ON
+  6. CREATE A DEDICATED CHANNEL for this project (e.g. #c3r-myproject)
+     and ONLY grant the bot access to that channel
+  7. Right-click the channel → Copy Channel ID
+  8. Right-click your own name → Copy User ID
 
 EOF
     load_config
     local tok cid uid
     tok=$(ask "Discord bot token [${DISCORD_BOT_TOKEN:+keep existing}]: " "${DISCORD_BOT_TOKEN:-}")
-    cid=$(ask "Discord channel ID [${DISCORD_CHANNEL_ID:-}]: " "${DISCORD_CHANNEL_ID:-}")
+    cid=$(ask "Project channel ID [${DISCORD_CHANNEL_ID:-}]: " "${DISCORD_CHANNEL_ID:-}")
     uid=$(ask "Your Discord user ID [${DISCORD_USER_ID:-}]: " "${DISCORD_USER_ID:-}")
-
-    [ -n "$tok" ] || die "bot token is required"
-    [ -n "$cid" ] || die "channel ID is required"
-    [ -n "$uid" ] || die "user ID is required"
-
-    export DISCORD_BOT_TOKEN="$tok"
-    export DISCORD_CHANNEL_ID="$cid"
-    export DISCORD_USER_ID="$uid"
+    [ -n "$tok" ] && [ -n "$cid" ] && [ -n "$uid" ] || die "all three values required"
+    export DISCORD_BOT_TOKEN="$tok" DISCORD_CHANNEL_ID="$cid" DISCORD_USER_ID="$uid"
     save_config
 }
 
-# --- smoke test ---
 wizard_smoke() {
-    info "running Discord round-trip smoke test..."
-    echo "${DIM}(free-text mode — reply to the bot in Discord)${RESET}"
+    info "Discord round-trip smoke test (free-text)"
     local reply
-    if ! reply=$("$C3R_DIR/bin/ask_human.py" "c3r smoke test — reply with any text" --timeout-min 5); then
-        die "smoke test failed — check bot token and channel ID"
-    fi
-    if [ "$reply" = "TIMEOUT_NO_HUMAN_RESPONSE" ]; then
-        warn "timed out waiting for your reply — is the bot in the right channel?"
-        local again
-        again=$(ask "Retry smoke test? [y/N]: " "N")
-        [[ "$again" =~ ^[Yy] ]] && wizard_smoke && return 0
-        die "smoke test abandoned"
-    fi
-    ok "free-text reply received: ${reply}"
-
-    echo
-    info "testing MCQ reaction mode..."
+    reply=$("$C3R_BIN/ask_human.py" "c3r smoke test — reply with any text" --timeout-min 5) || die "smoke test failed"
+    [ "$reply" = "TIMEOUT_NO_HUMAN_RESPONSE" ] && die "smoke test timed out — is the bot in the right channel?"
+    ok "free-text reply: $reply"
+    info "Discord MCQ smoke test"
     local choice
-    if ! choice=$("$C3R_DIR/bin/ask_human.py" "MCQ smoke test — tap one" \
-        --choices "left" "middle" "right" --timeout-min 5); then
-        die "MCQ smoke test failed"
-    fi
+    choice=$("$C3R_BIN/ask_human.py" "MCQ smoke test — tap one" --choices "left" "middle" "right" --timeout-min 5) || die "MCQ test failed"
     [ "$choice" = "TIMEOUT_NO_HUMAN_RESPONSE" ] && die "MCQ test timed out"
-    ok "MCQ reply received: ${choice}"
+    ok "MCQ reply: $choice"
 }
 
-# --- wire c3r into target repo ---
-wizard_wire() {
-    local target="$1" a="$2" b="$3"
-    info "creating worktrees in $target ..."
-    "$C3R_DIR/scripts/setup_worktrees.sh" "$target" "$a" "$b"
-
-    local parent repo_name
-    parent="$(dirname "$target")"
-    repo_name="$(basename "$target")"
-
-    seed_worktree() {
-        local wt="$1" role="$2"
-        local ralph="$wt/.ralph"
-        mkdir -p "$ralph"
-        [ -f "$ralph/PROMPT.md" ]       || cp "$C3R_DIR/templates/PROMPT_${role}.md" "$ralph/PROMPT.md"
-        [ -f "$ralph/fix_plan.md" ]     || cp "$C3R_DIR/templates/fix_plan.md"       "$ralph/fix_plan.md"
-        [ -f "$ralph/RESEARCH_LOG.md" ] || cp "$C3R_DIR/templates/RESEARCH_LOG.md"   "$ralph/RESEARCH_LOG.md"
-        [ -f "$ralph/.ralphrc" ]        || cp "$C3R_DIR/templates/ralphrc.example"   "$ralph/.ralphrc"
-        ok "seeded $ralph/ ($role)"
-    }
-
-    seed_worktree "$parent/${repo_name}-${a}" "$a"
-    seed_worktree "$parent/${repo_name}-${b}" "$b"
-
-    local link="$target/scripts/c3r"
-    mkdir -p "$target/scripts"
-    if [ ! -e "$link" ]; then
-        ln -s "$C3R_DIR/bin" "$link"
-        ok "symlinked $link → $C3R_DIR/bin"
-    fi
+# render a PROMPT.md by substituting {{PLACEHOLDERS}} from template
+render_prompt() {
+    local template="$1" out="$2"
+    local name="$3" role="$4" focus="$5" siblings="$6" own="$7" notown="$8" ping_budget="$9"
+    # Use python for safe substitution (bash sed gets messy with special chars in focus text)
+    python3 - "$template" "$out" "$name" "$role" "$focus" "$siblings" "$own" "$notown" "$ping_budget" <<'PY'
+import sys
+_, tpl, out, name, role, focus, siblings, own, notown, budget = sys.argv
+with open(tpl) as f: s = f.read()
+sib_up = siblings.upper().replace(",", "_").replace(" ", "")
+reasons = "Three consecutive runs inconclusive\n- Fundamental reward/architecture redesign\n- Hardware constraint you cannot resolve"
+s = (s.replace("{{AGENT_NAME}}", name)
+      .replace("{{AGENT_ROLE}}", role)
+      .replace("{{FOCUS}}", focus)
+      .replace("{{SIBLINGS}}", siblings or "(none)")
+      .replace("{{SIBLING_UPPER}}", sib_up or "OTHERS")
+      .replace("{{SCOPE_OWN}}", own)
+      .replace("{{SCOPE_NOT}}", notown)
+      .replace("{{PING_BUDGET}}", budget)
+      .replace("{{PING_REASONS}}", reasons))
+with open(out, "w") as f: f.write(s)
+PY
 }
 
-# --- subcommand: init ---
+write_agent_conf() {
+    local wt="$1" name="$2" role="$3" model="$4" thread="${5:-}"
+    cat > "$wt/.c3r/agent.conf" <<EOF
+AGENT_NAME="$name"
+AGENT_ROLE="$role"
+AGENT_MODEL="$model"
+ITERATION_COOLDOWN_SEC=20
+MAX_CONSECUTIVE_FAILURES=5
+CONTEXT_ALERT_THRESHOLDS="25 50 75 100"
+C3R_AGENT_THREAD_ID="$thread"
+EOF
+}
+
 cmd_init() {
-    local target="${1:-$PWD}"
-    target="$(cd "$target" && pwd)"
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
     [ -d "$target/.git" ] || die "not a git repo: $target"
+    info "target: $target"
 
-    local a b
-    a=$(ask "agent A name [policy]: " "policy")
-    b=$(ask "agent B name [perception]: " "perception")
+    local project_name
+    project_name=$(ask "Project name (alnum, for tmux session + board title) [$(basename "$target")]: " "$(basename "$target")")
 
-    info "target:  $target"
-    info "agents:  $a, $b"
+    local n_agents
+    n_agents=$(ask "Number of agents to create [2]: " "2")
+    [[ "$n_agents" =~ ^[1-9][0-9]*$ ]] || die "invalid agent count"
+
+    declare -a AG_NAMES AG_ROLES AG_MODELS AG_FOCI
+    for i in $(seq 1 "$n_agents"); do
+        echo
+        info "Agent $i of $n_agents"
+        local name role model focus
+        name=$(ask "  name [agent$i]: " "agent$i")
+        echo "  Role templates: generic | literature | coding | writing | custom"
+        role=$(ask "  role [generic]: " "generic")
+        echo "  Models: sonnet (default) | opus | haiku"
+        local m_short; m_short=$(ask "  model [sonnet]: " "sonnet")
+        case "$m_short" in
+            sonnet) model="claude-sonnet-4-6" ;;
+            opus)   model="claude-opus-4-6" ;;
+            haiku)  model="claude-haiku-4-5-20251001" ;;
+            claude-*) model="$m_short" ;;
+            *) die "unknown model: $m_short" ;;
+        esac
+        focus=$(ask "  one-sentence focus: " "")
+        [ -n "$focus" ] || die "focus is required"
+        AG_NAMES+=("$name"); AG_ROLES+=("$role"); AG_MODELS+=("$model"); AG_FOCI+=("$focus")
+    done
+
     echo
+    info "GPU lock mode"
+    cat <<'EOF'
+  serial  (default) — only one agent's GPU workload runs at a time (flock-based).
+                      Safe for single-GPU boxes. Agents block on each other.
+  none              — no GPU lock. Use only if agents don't touch the GPU or
+                      you have per-agent GPUs allocated manually.
+EOF
+    local gpu_mode; gpu_mode=$(ask "GPU lock [serial]: " "serial")
 
-    # Discord config: reuse or re-wizard
+    # Discord creds
+    echo
     load_config
     if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ -n "${DISCORD_CHANNEL_ID:-}" ] && [ -n "${DISCORD_USER_ID:-}" ]; then
-        ok "Discord config already saved ($CONFIG_FILE)"
-        local reuse
-        reuse=$(ask "Reuse existing config? [Y/n]: " "Y")
-        [[ "$reuse" =~ ^[Nn] ]] && wizard_discord
+        ok "Discord config already saved"
+        local reuse; reuse=$(ask "Reuse existing config? [Y/n]: " "Y")
+        [[ "$reuse" =~ ^[Nn] ]] && wizard_discord_creds
     else
-        wizard_discord
+        wizard_discord_creds
     fi
 
-    local do_smoke
-    do_smoke=$(ask "Run Discord smoke test? [Y/n]: " "Y")
+    local do_smoke; do_smoke=$(ask "Run Discord smoke test? [Y/n]: " "Y")
     [[ ! "$do_smoke" =~ ^[Nn] ]] && wizard_smoke
 
-    wizard_wire "$target" "$a" "$b"
+    # Worktrees
+    info "creating git worktrees..."
+    "$C3R_DIR/scripts/setup_worktrees.sh" "$target" "${AG_NAMES[@]}"
+
+    # state.json
+    mkdir -p "$target/.c3r"
+    local state="$target/.c3r/state.json"
+    python3 - "$state" "$project_name" "${DISCORD_CHANNEL_ID}" "$gpu_mode" "${AG_NAMES[@]}" <<PY
+import json, sys, os
+state_path = sys.argv[1]; project = sys.argv[2]; channel = sys.argv[3]; gpu = sys.argv[4]
+names = sys.argv[5:]
+roles = ${AG_ROLES[@]@Q}.split()  # placeholder — overwritten below
+PY
+    # Easier: build the JSON directly in bash via python with explicit args
+    python3 > "$state" <<PY
+import json
+state = {
+  "project": "$project_name",
+  "channel_id": "$DISCORD_CHANNEL_ID",
+  "board_message_id": None,
+  "gpu_lock": "$gpu_mode",
+  "paused": False,
+  "agents": [
+$(for i in "${!AG_NAMES[@]}"; do
+    n="${AG_NAMES[$i]}"; r="${AG_ROLES[$i]}"; m="${AG_MODELS[$i]}"; f="${AG_FOCI[$i]}"
+    wt="$(dirname "$target")/$(basename "$target")-${n}"
+    printf '    {"name": "%s", "role": "%s", "model": "%s", "focus": %s, "branch": "agent/%s", "worktree": "%s", "thread_id": null, "status": "idle", "last_iter": 0, "last_iter_ts": null, "last_context_pct": 0, "fail_streak": 0},\n' \
+        "$n" "$r" "$m" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$f")" "$n" "$wt"
+done)
+  ]
+}
+# trim trailing comma
+import sys, re, json
+PY
+    # The above trick is fragile with the trailing comma — rebuild the JSON purely in python instead.
+    python3 - <<PY > "$state"
+import json
+agents = []
+names = """${AG_NAMES[@]}""".split()
+roles = """${AG_ROLES[@]}""".split()
+models = """${AG_MODELS[@]}""".split()
+# foci may contain spaces → pass via env
+import os
+foci_raw = os.environ.get("_C3R_FOCI", "")
+foci = foci_raw.split("\x1f")  # unit separator
+parent = "$(dirname "$target")"; repo_name = "$(basename "$target")"
+for n, r, m, f in zip(names, roles, models, foci):
+    agents.append({
+        "name": n, "role": r, "model": m, "focus": f,
+        "branch": f"agent/{n}",
+        "worktree": f"{parent}/{repo_name}-{n}",
+        "thread_id": None, "status": "idle",
+        "last_iter": 0, "last_iter_ts": None,
+        "last_context_pct": 0, "fail_streak": 0,
+    })
+state = {
+    "project": "$project_name",
+    "channel_id": "$DISCORD_CHANNEL_ID",
+    "board_message_id": None,
+    "gpu_lock": "$gpu_mode",
+    "paused": False,
+    "agents": agents,
+}
+print(json.dumps(state, indent=2))
+PY
+    export _C3R_FOCI="$(IFS=$'\x1f'; echo "${AG_FOCI[*]}")"
+    # Re-run with env var set
+    _C3R_FOCI="$(printf '%s\x1f' "${AG_FOCI[@]}")" python3 - > "$state" <<PY
+import json, os
+agents = []
+names = """${AG_NAMES[@]}""".split()
+roles = """${AG_ROLES[@]}""".split()
+models = """${AG_MODELS[@]}""".split()
+foci = os.environ["_C3R_FOCI"].rstrip("\x1f").split("\x1f")
+parent = "$(dirname "$target")"; repo_name = "$(basename "$target")"
+for n, r, m, f in zip(names, roles, models, foci):
+    agents.append({
+        "name": n, "role": r, "model": m, "focus": f,
+        "branch": f"agent/{n}",
+        "worktree": f"{parent}/{repo_name}-{n}",
+        "thread_id": None, "status": "idle",
+        "last_iter": 0, "last_iter_ts": None,
+        "last_context_pct": 0, "fail_streak": 0,
+    })
+state = {
+    "project": "$project_name",
+    "channel_id": "$DISCORD_CHANNEL_ID",
+    "board_message_id": None,
+    "gpu_lock": "$gpu_mode",
+    "paused": False,
+    "agents": agents,
+}
+print(json.dumps(state, indent=2))
+PY
+    ok "wrote $state"
+
+    # Seed per-worktree .c3r/
+    local parent; parent="$(dirname "$target")"
+    local repo_name; repo_name="$(basename "$target")"
+    for i in "${!AG_NAMES[@]}"; do
+        local name="${AG_NAMES[$i]}" role="${AG_ROLES[$i]}" model="${AG_MODELS[$i]}" focus="${AG_FOCI[$i]}"
+        local wt="$parent/${repo_name}-${name}"
+        mkdir -p "$wt/.c3r"
+        # siblings list
+        local siblings=""
+        for j in "${!AG_NAMES[@]}"; do [ "$i" != "$j" ] && siblings+="${AG_NAMES[$j]},"; done
+        siblings="${siblings%,}"
+        # role template
+        local tpl="$C3R_DIR/templates/PROMPT_${role}.md"
+        [ -f "$tpl" ] || tpl="$C3R_DIR/templates/PROMPT_generic.md"
+        render_prompt "$tpl" "$wt/.c3r/PROMPT.md" "$name" "$role" "$focus" "$siblings" "(agent-defined)" "(sibling-owned)" "1"
+        [ -f "$wt/.c3r/fix_plan.md" ]     || cp "$C3R_DIR/templates/fix_plan.md"     "$wt/.c3r/fix_plan.md"
+        [ -f "$wt/.c3r/RESEARCH_LOG.md" ] || cp "$C3R_DIR/templates/RESEARCH_LOG.md" "$wt/.c3r/RESEARCH_LOG.md"
+        [ -f "$wt/.c3r/INBOX.md" ]        || cp "$C3R_DIR/templates/INBOX.md"        "$wt/.c3r/INBOX.md"
+        write_agent_conf "$wt" "$name" "$role" "$model"
+        ok "seeded $wt/.c3r/ ($role)"
+    done
+
+    # Symlink scripts/c3r → $C3R_BIN
+    local link="$target/scripts/c3r"
+    mkdir -p "$target/scripts"
+    [ -e "$link" ] || { ln -s "$C3R_BIN" "$link"; ok "symlinked $link → $C3R_BIN"; }
+
+    # Post the status board & create threads
+    info "creating Discord status board + agent threads..."
+    "$C3R_BIN/status_board.py" init --state "$state" >/dev/null
+    ok "status board posted"
+
+    # Copy thread IDs from state back into each agent's agent.conf
+    python3 - "$state" "$parent" "$repo_name" <<'PY'
+import json, sys, pathlib
+state = json.load(open(sys.argv[1])); parent, repo = sys.argv[2], sys.argv[3]
+for a in state["agents"]:
+    conf = pathlib.Path(a["worktree"]) / ".c3r" / "agent.conf"
+    if not conf.exists(): continue
+    lines = conf.read_text().splitlines()
+    out = []
+    for line in lines:
+        if line.startswith("C3R_AGENT_THREAD_ID="):
+            out.append(f'C3R_AGENT_THREAD_ID="{a.get("thread_id","")}"')
+        else:
+            out.append(line)
+    conf.write_text("\n".join(out) + "\n")
+PY
+    ok "wrote thread IDs into agent.conf files"
+
+    # Seed fix_plan interactively
+    echo
+    info "Seed each agent's fix_plan.md with 3-5 concrete starting tasks?"
+    local do_seed; do_seed=$(ask "Seed now? [Y/n]: " "Y")
+    if [[ ! "$do_seed" =~ ^[Nn] ]]; then
+        for i in "${!AG_NAMES[@]}"; do
+            local name="${AG_NAMES[$i]}"
+            local wt="$parent/${repo_name}-${name}"
+            echo
+            info "fix_plan.md for $name (one task per line; empty line to finish):"
+            local -a tasks=()
+            local line
+            while IFS= read -rp "  > " line && [ -n "$line" ]; do tasks+=("$line"); done
+            if [ "${#tasks[@]}" -gt 0 ]; then
+                {
+                    echo "# fix_plan.md — experiment queue for $name"
+                    echo
+                    for t in "${tasks[@]}"; do echo "- [ ] $t"; done
+                } > "$wt/.c3r/fix_plan.md"
+                ok "seeded ${#tasks[@]} tasks into $wt/.c3r/fix_plan.md"
+            fi
+        done
+    fi
 
     cat <<EOF
 
 ${GREEN}${BOLD}c3r init complete.${RESET}
 
-Next steps:
-  1. Inside each worktree, once:
-       cd $(dirname "$target")/$(basename "$target")-${a} && ralph-enable-ci
-       cd $(dirname "$target")/$(basename "$target")-${b} && ralph-enable-ci
-  2. Edit each worktree's .ralph/fix_plan.md with 3-5 concrete starting tasks.
-  3. Launch:
-       c3r launch $target $a $b
+Launch the agents:
+  c3r launch $target
+
+Attach:
+  tmux attach -t c3r-$project_name
+
+Pause anytime from your phone:  !c3r pause   (in your Discord channel)
+Resume:                         !c3r resume
+Talk to an agent:               reply in its Discord thread
 EOF
 }
 
-# --- subcommand: launch ---
+# ------------------------------------------------------------------
+# launch / stop / pause / resume / status
+# ------------------------------------------------------------------
+
 cmd_launch() {
     load_config
-    local target="${1:-$PWD}"
-    target="$(cd "$target" && pwd)"
-    local a="${2:-policy}" b="${3:-perception}"
-    exec "$C3R_DIR/scripts/launch_agents.sh" "$target" "$a" "$b"
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+
+    if tmux has-session -t "$session" 2>/dev/null; then
+        ok "session '$session' already running — attach: tmux attach -t $session"
+        return 0
+    fi
+
+    "$C3R_DIR/scripts/launch_agents.sh" "$target"
+
+    # Add a listener window
+    tmux new-window -t "$session" -n "listen" \
+        "bash -lc \"export C3R_STATE='$state' DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' DISCORD_USER_ID='$DISCORD_USER_ID' && '$C3R_BIN/listen.py'\""
+    ok "session '$session' up (including listener window)"
+    info "attach: tmux attach -t $session"
 }
 
-# --- subcommand: stop ---
 cmd_stop() {
-    local session="${1:-${C3R_TMUX_SESSION:-c3r}}"
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
     if tmux has-session -t "$session" 2>/dev/null; then
-        tmux kill-session -t "$session"
-        ok "killed session: $session"
+        tmux kill-session -t "$session"; ok "killed $session"
     else
-        warn "no tmux session named '$session'"
+        warn "no session $session"
     fi
 }
 
-# --- help ---
-cmd_help() {
-    sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+cmd_pause() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    python3 - "$state" <<'PY'
+import json, sys, pathlib
+state_path = sys.argv[1]
+state = json.load(open(state_path))
+for a in state["agents"]:
+    pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").touch()
+state["paused"] = True
+json.dump(state, open(state_path, "w"), indent=2)
+PY
+    "$C3R_BIN/status_board.py" update --state "$state" || true
+    ok "all agents will pause after their current iteration"
 }
 
-# --- dispatch ---
+cmd_resume() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    python3 - "$state" <<'PY'
+import json, sys, pathlib
+state_path = sys.argv[1]
+state = json.load(open(state_path))
+for a in state["agents"]:
+    try: pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").unlink()
+    except FileNotFoundError: pass
+state["paused"] = False
+json.dump(state, open(state_path, "w"), indent=2)
+PY
+    "$C3R_BIN/status_board.py" update --state "$state" || true
+    ok "agents resumed"
+}
+
+cmd_status() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    python3 - "$state" <<'PY'
+import json, sys, os
+from datetime import datetime, timezone
+s = json.load(open(sys.argv[1]))
+print(f"\033[1mproject:\033[0m {s['project']}   paused={s.get('paused')}   gpu_lock={s.get('gpu_lock','?')}")
+for a in s["agents"]:
+    paused = os.path.exists(os.path.join(a["worktree"], ".c3r/PAUSED"))
+    print(f"  {'⏸' if paused else '●'} {a['name']:<14} {a.get('status','?'):<8} "
+          f"iter={a.get('last_iter',0)}  ctx={a.get('last_context_pct',0)}%  "
+          f"fail_streak={a.get('fail_streak',0)}  {a['worktree']}")
+    log = os.path.join(a["worktree"], ".c3r/RESEARCH_LOG.md")
+    if os.path.exists(log):
+        lines = open(log).read().strip().splitlines()[-3:]
+        for ln in lines: print(f"      {ln}")
+PY
+    "$C3R_BIN/status_board.py" update --state "$state" || true
+}
+
+# ------------------------------------------------------------------
+# logs / ask / ping
+# ------------------------------------------------------------------
+
+cmd_logs() {
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    local agent="${2:-}"
+    local files
+    if [ -n "$agent" ]; then
+        files=$(python3 -c "import json;s=json.load(open('$state'));print([a['worktree'] for a in s['agents'] if a['name']=='$agent'][0]+'/.c3r/RESEARCH_LOG.md')")
+    else
+        files=$(python3 -c "import json;s=json.load(open('$state'));print(' '.join(a['worktree']+'/.c3r/RESEARCH_LOG.md' for a in s['agents']))")
+    fi
+    # shellcheck disable=SC2086
+    exec tail -F $files
+}
+
+cmd_ask() {
+    load_config
+    exec "$C3R_BIN/ask_human.py" "$@"
+}
+
+cmd_ping() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+    local agent="${1:?usage: c3r ping [path] AGENT_NAME MESSAGE}"; shift
+    local msg="$*"
+    [ -n "$msg" ] || die "message required"
+    python3 - "$state" "$agent" "$msg" <<'PY'
+import json, sys, pathlib, os
+from datetime import datetime, timezone
+state_path, agent, msg = sys.argv[1:4]
+state = json.load(open(state_path))
+a = next((x for x in state["agents"] if x["name"] == agent), None)
+if not a: print(f"no such agent: {agent}", file=sys.stderr); raise SystemExit(1)
+inbox = pathlib.Path(a["worktree"]) / ".c3r/INBOX.md"
+inbox.parent.mkdir(parents=True, exist_ok=True)
+if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
+    inbox.write_text("# INBOX\n\n")
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+with inbox.open("a") as f:
+    f.write(f"\n---\n**you (cli)** · {ts}\n\n{msg}\n")
+print(f"delivered to {agent}")
+# Also post in the agent's Discord thread for symmetry
+if a.get("thread_id"):
+    import subprocess
+    subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/notify.py",
+                    "--thread", a["thread_id"],
+                    f"📨 **you (cli)**: {msg}"], check=False)
+PY
+    ok "delivered"
+}
+
+# ------------------------------------------------------------------
+# add-agent / reset / board / update
+# ------------------------------------------------------------------
+
+cmd_add_agent() {
+    warn "add-agent: not yet implemented in this build — edit state.json and run 'c3r stop && c3r launch' manually"
+    return 1
+}
+
+cmd_reset() {
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local name="${1:?usage: c3r reset [path] AGENT_NAME}"
+    local state; state="$(require_state "$target")"
+    local wt; wt="$(python3 -c "import json;s=json.load(open('$state'));print(next(a['worktree'] for a in s['agents'] if a['name']=='$name'))")"
+    warn "this will delete: $wt and branch agent/$name"
+    local confirm; confirm=$(ask "Proceed? [y/N]: " "N")
+    [[ "$confirm" =~ ^[Yy] ]] || { info "aborted"; return 0; }
+    cd "$target"
+    git worktree remove --force "$wt" || true
+    git branch -D "agent/$name" || true
+    python3 - "$state" "$name" <<'PY'
+import json, sys
+state_path, name = sys.argv[1:3]
+s = json.load(open(state_path))
+s["agents"] = [a for a in s["agents"] if a["name"] != name]
+json.dump(s, open(state_path, "w"), indent=2)
+PY
+    "$C3R_BIN/status_board.py" update --state "$state" || true
+    ok "removed agent $name"
+}
+
+cmd_board() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+    local sub="${1:?usage: c3r board (bump|update)}"
+    "$C3R_BIN/status_board.py" "$sub" --state "$state"
+}
+
+cmd_update() {
+    info "git pull in $C3R_DIR"
+    git -C "$C3R_DIR" pull --ff-only
+}
+
+cmd_listen() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    export C3R_STATE="$state"
+    exec "$C3R_BIN/listen.py"
+}
+
+# ------------------------------------------------------------------
+# dispatch
+# ------------------------------------------------------------------
 load_config
-case "${1:-help}" in
-    init)    shift; cmd_init    "$@" ;;
-    launch)  shift; cmd_launch  "$@" ;;
-    stop)    shift; cmd_stop    "$@" ;;
-    doctor)  shift; cmd_doctor  "$@" ;;
-    config)  shift; cmd_config  "$@" ;;
-    install) shift; cmd_install "$@" ;;
-    help|-h|--help) cmd_help ;;
-    *) cmd_help; die "unknown subcommand: $1" ;;
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    init)      cmd_init      "$@" ;;
+    launch)    cmd_launch    "$@" ;;
+    stop)      cmd_stop      "$@" ;;
+    pause)     cmd_pause     "$@" ;;
+    resume)    cmd_resume    "$@" ;;
+    status)    cmd_status    "$@" ;;
+    logs)      cmd_logs      "$@" ;;
+    ask)       cmd_ask       "$@" ;;
+    ping)      cmd_ping      "$@" ;;
+    add-agent) cmd_add_agent "$@" ;;
+    reset)     cmd_reset     "$@" ;;
+    update)    cmd_update    "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    doctor)    cmd_doctor    "$@" ;;
+    config)    cmd_config    "$@" ;;
+    install)   cmd_install   "$@" ;;
+    board)     cmd_board     "$@" ;;
+    listen)    cmd_listen    "$@" ;;
+    help|-h|--help) cmd_help "$@" ;;
+    *) cmd_help; die "unknown command: $cmd" ;;
 esac
