@@ -68,7 +68,11 @@ while :; do
 
     # --- invoke claude code headless ---
     # `--output-format json` returns a JSON envelope including usage counts.
-    if claude -p --output-format json --model "$AGENT_MODEL" < "$PROMPT" > "$tmp_out" 2>&1; then
+    # --dangerously-skip-permissions is REQUIRED for autonomous loops: without
+    # it, `claude -p` runs in restricted mode and refuses Edit/Write/Bash, so
+    # the agent would read files, reason, and exit without doing any work.
+    if claude -p --output-format json --model "$AGENT_MODEL" \
+            --dangerously-skip-permissions < "$PROMPT" > "$tmp_out" 2>&1; then
         # parse usage (best effort; missing keys → 0)
         usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
         usage_out=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('output_tokens',0))" 2>/dev/null || echo 0)

@@ -756,7 +756,10 @@ GREEN, YELLOW, RED, BLUE, CYAN, GREY = "\033[32m","\033[33m","\033[31m","\033[34
 ICON = {"idle":"○","running":f"{GREEN}●{RESET}","paused":f"{YELLOW}⏸{RESET}","error":f"{RED}✗{RESET}","stopped":f"{GREY}·{RESET}"}
 
 s = json.load(open(os.environ["C3R_STATE"]))
-cols = int(os.environ.get("COLUMNS") or os.get_terminal_size().columns or 100)
+try:
+    cols = int(os.environ.get("COLUMNS") or os.get_terminal_size().columns)
+except OSError:
+    cols = 100
 bar = "─" * min(cols, 100)
 paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
 print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
@@ -875,8 +878,10 @@ for a in s["agents"]:
           f"fail_streak={a.get('fail_streak',0)}  {a['worktree']}")
     log = os.path.join(a["worktree"], ".c3r/RESEARCH_LOG.md")
     if os.path.exists(log):
-        lines = open(log).read().strip().splitlines()[-3:]
-        for ln in lines: print(f"      {ln}")
+        # Only show lines that look like real entries (skip header/separator)
+        all_lines = [l for l in open(log).read().splitlines() if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
+        for ln in all_lines[-3:]: print(f"      {ln}")
+        if not all_lines: print(f"      (no log entries yet)")
 PY
     "$C3R_BIN/status_board.py" update --state "$state" || true
 }
