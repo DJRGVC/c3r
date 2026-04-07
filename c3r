@@ -83,6 +83,7 @@ ${BOLD}SETUP${RESET}
 
 ${BOLD}RUNNING${RESET}
   launch [path]           start the tmux session with all agents
+  attach [path]           attach to the running tmux session (alias: a)
   stop [path]             kill the tmux session (non-destructive)
   pause [path]            pause all agents cooperatively
   resume [path]           resume paused agents
@@ -736,6 +737,14 @@ cmd_launch() {
     info "attach: tmux attach -t $session"
 }
 
+cmd_attach() {
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+    tmux has-session -t "$session" 2>/dev/null || die "session '$session' is not running — use 'c3r launch' first"
+    exec tmux attach -t "$session"
+}
+
 cmd_stop() {
     local target; target="$(cd "${1:-$PWD}" && pwd)"
     local state; state="$(require_state "$target")"
@@ -922,6 +931,7 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
     init)      cmd_init      "$@" ;;
     launch)    cmd_launch    "$@" ;;
+    attach|a)  cmd_attach    "$@" ;;
     stop)      cmd_stop      "$@" ;;
     pause)     cmd_pause     "$@" ;;
     resume)    cmd_resume    "$@" ;;
