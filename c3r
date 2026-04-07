@@ -585,76 +585,21 @@ EOF
     info "creating git worktrees..."
     "$C3R_DIR/scripts/setup_worktrees.sh" "$target" "${AG_NAMES[@]}"
 
-    # state.json
+    # state.json — pass names/roles/models/foci via env (foci may contain spaces)
     mkdir -p "$target/.c3r"
     local state="$target/.c3r/state.json"
-    python3 - "$state" "$project_name" "${DISCORD_CHANNEL_ID}" "$gpu_mode" "${AG_NAMES[@]}" <<PY
-import json, sys, os
-state_path = sys.argv[1]; project = sys.argv[2]; channel = sys.argv[3]; gpu = sys.argv[4]
-names = sys.argv[5:]
-roles = ${AG_ROLES[@]@Q}.split()  # placeholder — overwritten below
-PY
-    # Easier: build the JSON directly in bash via python with explicit args
-    python3 > "$state" <<PY
-import json
-state = {
-  "project": "$project_name",
-  "channel_id": "$DISCORD_CHANNEL_ID",
-  "board_message_id": None,
-  "gpu_lock": "$gpu_mode",
-  "paused": False,
-  "agents": [
-$(for i in "${!AG_NAMES[@]}"; do
-    n="${AG_NAMES[$i]}"; r="${AG_ROLES[$i]}"; m="${AG_MODELS[$i]}"; f="${AG_FOCI[$i]}"
-    wt="$(dirname "$target")/$(basename "$target")-${n}"
-    printf '    {"name": "%s", "role": "%s", "model": "%s", "focus": %s, "branch": "agent/%s", "worktree": "%s", "thread_id": null, "status": "idle", "last_iter": 0, "last_iter_ts": null, "last_context_pct": 0, "fail_streak": 0},\n' \
-        "$n" "$r" "$m" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$f")" "$n" "$wt"
-done)
-  ]
-}
-# trim trailing comma
-import sys, re, json
-PY
-    # The above trick is fragile with the trailing comma — rebuild the JSON purely in python instead.
-    python3 - <<PY > "$state"
-import json
-agents = []
-names = """${AG_NAMES[@]}""".split()
-roles = """${AG_ROLES[@]}""".split()
-models = """${AG_MODELS[@]}""".split()
-# foci may contain spaces → pass via env
-import os
-foci_raw = os.environ.get("_C3R_FOCI", "")
-foci = foci_raw.split("\x1f")  # unit separator
-parent = "$(dirname "$target")"; repo_name = "$(basename "$target")"
-for n, r, m, f in zip(names, roles, models, foci):
-    agents.append({
-        "name": n, "role": r, "model": m, "focus": f,
-        "branch": f"agent/{n}",
-        "worktree": f"{parent}/{repo_name}-{n}",
-        "thread_id": None, "status": "idle",
-        "last_iter": 0, "last_iter_ts": None,
-        "last_context_pct": 0, "fail_streak": 0,
-    })
-state = {
-    "project": "$project_name",
-    "channel_id": "$DISCORD_CHANNEL_ID",
-    "board_message_id": None,
-    "gpu_lock": "$gpu_mode",
-    "paused": False,
-    "agents": agents,
-}
-print(json.dumps(state, indent=2))
-PY
-    export _C3R_FOCI="$(IFS=$'\x1f'; echo "${AG_FOCI[*]}")"
-    # Re-run with env var set
-    _C3R_FOCI="$(printf '%s\x1f' "${AG_FOCI[@]}")" python3 - > "$state" <<PY
+    _C3R_NAMES="$(printf '%s\x1f' "${AG_NAMES[@]}")" \
+    _C3R_ROLES="$(printf '%s\x1f' "${AG_ROLES[@]}")" \
+    _C3R_MODELS="$(printf '%s\x1f' "${AG_MODELS[@]}")" \
+    _C3R_FOCI="$(printf '%s\x1f' "${AG_FOCI[@]}")" \
+    python3 - > "$state" <<PY
 import json, os
+def _split(k): return os.environ[k].rstrip("\x1f").split("\x1f")
+names = _split("_C3R_NAMES")
+roles = _split("_C3R_ROLES")
+models = _split("_C3R_MODELS")
+foci = _split("_C3R_FOCI")
 agents = []
-names = """${AG_NAMES[@]}""".split()
-roles = """${AG_ROLES[@]}""".split()
-models = """${AG_MODELS[@]}""".split()
-foci = os.environ["_C3R_FOCI"].rstrip("\x1f").split("\x1f")
 parent = "$(dirname "$target")"; repo_name = "$(basename "$target")"
 for n, r, m, f in zip(names, roles, models, foci):
     agents.append({
