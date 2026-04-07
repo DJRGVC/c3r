@@ -1,0 +1,20 @@
+# .ralphrc — c3r-tuned config for open-ended RL research loops.
+# Drop this at <worktree>/.ralph/.ralphrc after `ralph-enable-ci`.
+
+# Long training runs — Ralph's default is built for code-edit cycles.
+CLAUDE_TIMEOUT_MINUTES=120
+
+# Never terminate on "looks done" heuristics. Research is open-ended.
+DISABLE_EXIT_DETECTION=true
+EXIT_SIGNAL_REQUIRED=true
+
+# Circuit breaker loose enough to survive occasional training crashes.
+MAX_CONSECUTIVE_FAILURES=5
+AUTO_RESET_CIRCUIT=true
+
+# Default model: Sonnet 4.6 for routine iterations (see c3r/SETUP.md for rationale).
+# Manually flip to opus via /model when debugging a hard problem.
+CLAUDE_MODEL=claude-sonnet-4-6
+
+# Rate-limit friendly pacing between iterations (seconds).
+ITERATION_COOLDOWN=20
