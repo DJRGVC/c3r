@@ -84,6 +84,7 @@ ${BOLD}SETUP${RESET}
 ${BOLD}RUNNING${RESET}
   launch [path]           start the tmux session with all agents
   attach [path]           attach to the running tmux session (alias: a)
+  watch [path] [sec]      live dashboard (alias: w; default refresh 3s; q quits)
   stop [path]             kill the tmux session (non-destructive)
   pause [path]            pause all agents cooperatively
   resume [path]           resume paused agents
@@ -737,6 +738,73 @@ cmd_launch() {
     info "attach: tmux attach -t $session"
 }
 
+cmd_watch() {
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local state; state="$(require_state "$target")"
+    local interval="${2:-3}"
+    # Hide cursor, restore on exit
+    printf '\e[?25l'
+    trap 'printf "\e[?25h\n"; exit 0' INT TERM EXIT
+    while :; do
+        # Render a single screen to a buffer, then clear+print atomically
+        local buf
+        buf="$(C3R_STATE="$state" C3R_INTERVAL="$interval" python3 - <<'PY'
+import json, os, time
+from datetime import datetime, timezone
+RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+GREEN, YELLOW, RED, BLUE, CYAN, GREY = "\033[32m","\033[33m","\033[31m","\033[34m","\033[36m","\033[90m"
+ICON = {"idle":"○","running":f"{GREEN}●{RESET}","paused":f"{YELLOW}⏸{RESET}","error":f"{RED}✗{RESET}","stopped":f"{GREY}·{RESET}"}
+
+s = json.load(open(os.environ["C3R_STATE"]))
+cols = int(os.environ.get("COLUMNS") or os.get_terminal_size().columns or 100)
+bar = "─" * min(cols, 100)
+paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
+print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
+print(bar)
+hdr = f"{BOLD}{'':2}{'AGENT':<14}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'CTX%':>5}  {'LAST':<12}{'FAIL':>5}{RESET}"
+print(hdr)
+for a in s["agents"]:
+    st = a.get("status","idle")
+    icon = ICON.get(st, "·")
+    model = a.get("model","").replace("claude-","").replace("-4-6","").replace("-4-5-20251001","")[:10]
+    iter_n = f"#{a.get('last_iter',0)}"
+    ctx = a.get("last_context_pct",0)
+    ctx_col = GREEN if ctx<50 else YELLOW if ctx<75 else RED
+    ts = a.get("last_iter_ts")
+    rel = "—"
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts)
+            secs = int((datetime.now(timezone.utc)-dt).total_seconds())
+            rel = f"{secs}s ago" if secs<60 else f"{secs//60}m ago" if secs<3600 else f"{secs//3600}h ago"
+        except Exception: pass
+    fail = a.get("fail_streak",0)
+    fail_col = RED if fail>=3 else YELLOW if fail>0 else ""
+    print(f"  {icon} {a['name']:<12} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
+print(bar)
+
+# Last 2 log lines per agent
+for a in s["agents"]:
+    log = os.path.join(a["worktree"], ".c3r/RESEARCH_LOG.md")
+    if os.path.exists(log):
+        lines = [l for l in open(log).read().strip().splitlines() if l.strip()]
+        last = lines[-2:] if len(lines) >= 2 else lines
+        if last:
+            print(f"{CYAN}{a['name']}:{RESET}")
+            for ln in last:
+                print(f"  {DIM}{ln[:cols-4]}{RESET}")
+print(f"{DIM}{datetime.now().strftime('%H:%M:%S')}  ^C to exit{RESET}")
+PY
+)"
+        clear
+        printf '%s' "$buf"
+        # Wait for interval or 'q' keypress
+        read -rsn1 -t "$interval" key 2>/dev/null || true
+        [ "${key:-}" = "q" ] && break
+    done
+    printf '\e[?25h\n'
+}
+
 cmd_attach() {
     local target; target="$(cd "${1:-$PWD}" && pwd)"
     local state; state="$(require_state "$target")"
@@ -932,6 +1000,7 @@ case "$cmd" in
     init)      cmd_init      "$@" ;;
     launch)    cmd_launch    "$@" ;;
     attach|a)  cmd_attach    "$@" ;;
+    watch|w)   cmd_watch     "$@" ;;
     stop)      cmd_stop      "$@" ;;
     pause)     cmd_pause     "$@" ;;
     resume)    cmd_resume    "$@" ;;
