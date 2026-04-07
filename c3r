@@ -729,6 +729,25 @@ cmd_launch() {
         return 0
     fi
 
+    # Sync each agent's model from agent.conf → state.json so the dashboard
+    # reflects runtime config. agent.conf is the source of truth at runtime.
+    python3 - "$state" <<'PY'
+import json, os, re, sys
+path = sys.argv[1]
+s = json.load(open(path))
+changed = False
+for a in s["agents"]:
+    conf = os.path.join(a["worktree"], ".c3r/agent.conf")
+    if not os.path.exists(conf): continue
+    for line in open(conf):
+        m = re.match(r'\s*AGENT_MODEL\s*=\s*"([^"]+)"', line)
+        if m and a.get("model") != m.group(1):
+            a["model"] = m.group(1); changed = True
+if changed:
+    json.dump(s, open(path, "w"), indent=2)
+    print("[c3r] synced models from agent.conf → state.json")
+PY
+
     "$C3R_DIR/scripts/launch_agents.sh" "$target"
 
     # Add a listener window
