@@ -56,6 +56,10 @@ while :; do
         sleep 15
     done
 
+    # --- refresh the SIBLINGS.md snapshot so the agent has fresh cross-branch
+    # visibility at the top of every iteration
+    "$C3R_BIN/siblings_snapshot.py" "$C3R_STATE" "$C3R_AGENT_NAME" 2>/dev/null || true
+
     # --- circuit breaker ---
     if [ "$fail_streak" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
         echo "[agent_loop] circuit breaker tripped after $fail_streak failures; pausing" >&2

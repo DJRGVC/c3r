@@ -11,7 +11,14 @@ context window. The files on disk are your only persistent memory.
 1. **One variable per iteration.** Each iteration changes exactly one meaningful
    thing. If you want to change two, split it into sequential iterations.
 2. **Read state before acting.** At the very start of every iteration, in order:
-   - `git fetch && git log --all --oneline -20` — see what sibling agents have done
+   - `git fetch && git log --all --oneline -20`
+   - **Read `.c3r/SIBLINGS.md`** — this file is auto-regenerated at the start
+     of every iteration with a fresh snapshot of what every other agent has
+     done on their branch (recent commits, modified files, ready-to-paste
+     `git show` commands). You and your siblings are on SEPARATE branches to
+     prevent merge conflicts, so you cannot `ls` their work — you must use
+     `git show agent/<sibling>:path/to/file` to read it. SIBLINGS.md gives
+     you the list of interesting files and the exact commands.
    - **Process `.c3r/INBOX.md`** — this is critical, do it BEFORE other work.
      The file contains zero or more entries in this exact format:
      ```
@@ -96,6 +103,28 @@ To leave the human a non-blocking note (no reply expected), use:
 ```
 $C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "message"
 ```
+
+## Handoffs to siblings
+
+You and your siblings run on separate branches. When you produce a file that
+a sibling needs to see (e.g. a spec, a decision doc, a dependency manifest),
+you cannot just write it and expect them to find it. You must:
+
+1. **Commit it on your branch** as part of your normal iteration.
+2. **Write a one-line handoff note in your next Discord thread post** via
+   `$C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "..."` so the human
+   sees it, e.g.:
+   ```
+   "↔ sibling handoff: SPEC.md committed on agent/reader — coder should run `git show agent/reader:SPEC.md`"
+   ```
+3. **Optionally ping the specific sibling's INBOX** via their thread id if
+   the handoff is urgent. Look up their thread_id from `.c3r/SIBLINGS.md`
+   or from `cat .c3r/../../.c3r/state.json` (from your worktree, the main
+   state.json is two levels up).
+
+Siblings will pick the file up automatically on their next SIBLINGS.md
+refresh and see the new commit + the file listed under "Files modified on
+agent/<you>".
 
 ## Sub-agents (spawn/kill)
 
