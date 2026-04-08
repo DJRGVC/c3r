@@ -546,10 +546,21 @@ cmd_doctor() {
         if [ -n "${!v:-}" ]; then ok "$v set"; else warn "$v not set"; fails=$((fails+1)); fi
     done
     info "tools"
-    for tool in tmux flock python3 git claude jq; do
+    for tool in tmux flock python3 git setsid jq; do
         if command -v "$tool" >/dev/null; then ok "$tool → $(command -v "$tool")"
         else warn "$tool missing"; [ "$tool" = jq ] || fails=$((fails+1)); fi
     done
+    if command -v claude >/dev/null; then
+        ok "claude → $(command -v claude)"
+        if claude --version >/dev/null 2>&1; then
+            ok "claude CLI responds — likely logged in"
+        else
+            warn "claude CLI installed but --version failed — try: claude /login"
+            fails=$((fails+1))
+        fi
+    else
+        warn "claude CLI missing"; fails=$((fails+1))
+    fi
 
     if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
         info "Discord bot reachability"
