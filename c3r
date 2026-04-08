@@ -164,6 +164,97 @@ Before running: create a dedicated Discord channel for this project (e.g.
 The wizard does NOT launch agents — run `c3r launch` after init to start them.
 EOF
         ;;
+    attach|a) cat <<'EOF'
+c3r attach [TARGET_REPO]
+  (alias: c3r a)
+
+Attach to the project's running tmux session. Fails with a clear error if
+the session isn't up (run `c3r launch` first). Inside tmux:
+  Ctrl-b <n>   switch to window n (0=first agent, last window is listen)
+  Ctrl-b w     interactive window picker
+  Ctrl-b d     detach (leaves agents running)
+  Ctrl-b n/p   next / prev window
+
+NEVER press Ctrl-C inside an agent window — that kills the loop. Use
+Ctrl-b d to leave tmux without stopping anything.
+EOF
+        ;;
+    watch|w) cat <<'EOF'
+c3r watch [TARGET_REPO] [REFRESH_SEC]
+  (alias: c3r w)
+
+Live dashboard with 1-second (default) refresh. Hides cursor, clears and
+redraws each tick. Press `q` or Ctrl-C to exit.
+
+Layout (top to bottom):
+  1. Project name + pause state + gpu lock mode + agent count (N/cap)
+  2. Agent tree — indented children under parents:
+       ● policy          running  sonnet  #12   4%  5s ago   0
+         └─ lit-search   running  sonnet  #3    7%  12s ago  0
+       ● perception      running  sonnet  #8    3%  22s ago  0
+  3. INBOX panel — last 3 messages across all agents with status
+     (📬 unread / ✉ read), target agent, message body, response, timestamp
+  4. Recent log entries per agent (last 2-3 lines of RESEARCH_LOG.md)
+
+All data read from state.json + per-worktree files — no network calls.
+EOF
+        ;;
+    spawn) cat <<'EOF'
+c3r spawn [TARGET_REPO] NAME ROLE "FOCUS" [--model M] [--parent P]
+
+Dynamically create a new agent (mid-run is fine). Called by the human
+from CLI, or by an agent from within its own iteration via
+`$C3R_BIN/c3r spawn ...` — in that case the `parent` is auto-filled from
+$C3R_AGENT_NAME.
+
+What happens:
+  1. Check max_agents cap in state.json. Fails with exit 3 if full.
+  2. Verify name is unique and the parent (if any) exists.
+  3. Create git worktree at <parent>/<repo>-<NAME> on branch agent/NAME,
+     forked off c3r/<project> base branch.
+  4. Seed .c3r/ with PROMPT, fix_plan, RESEARCH_LOG, INBOX, agent.conf,
+     env.sh (inherited from parent worktree if possible).
+  5. Seed .claude/settings.json with the sandbox hook.
+  6. Create a standalone Discord thread titled "↳ NAME · FOCUS" (sub-agent)
+     or "NAME · FOCUS" (top-level). The ↳ prefix marks sub-agents visually.
+  7. Post a welcome message in the thread.
+  8. Append the new agent to state.json with parent field.
+  9. If the tmux session is live, add a new window running agent_loop.sh.
+  10. Update the status board.
+
+Exit codes:
+  0 = spawned successfully
+  2 = name already exists
+  3 = max_agents cap reached
+  4 = parent not found
+EOF
+        ;;
+    kill) cat <<'EOF'
+c3r kill [TARGET_REPO] NAME
+
+Non-destructively stop an agent. Cascades to all descendants in its
+subtree (killing a parent kills its children and grandchildren).
+
+Top-level agents (parent=null):
+  - Kills tmux window
+  - Sets status=stopped in state.json
+  - Posts farewell in Discord thread; THREAD IS PRESERVED for history
+  - Worktree, branch, git history, logs all preserved on disk
+
+Sub-agents (parent=<someone>):
+  - Kills tmux window
+  - Sets status=stopped in state.json
+  - DELETES the Discord thread entirely (requires Manage Threads perm)
+  - Worktree, branch, logs all preserved on disk
+  - Falls back to a farewell post if thread deletion fails
+
+Permission model (enforced when called by an agent):
+  - An agent can only kill itself or agents in its own subtree
+  - CLI caller (human, no $C3R_AGENT_NAME) can kill anyone
+
+To fully wipe an agent including worktree + branch, see `c3r reset`.
+EOF
+        ;;
     launch) cat <<'EOF'
 c3r launch [TARGET_REPO]
 
@@ -805,27 +896,37 @@ for a in state["agents"]:
 PY
     ok "wrote thread IDs into agent.conf files"
 
-    # Seed fix_plan interactively
+    # Seed fix_plan via $EDITOR (avoids terminal-wrap line fragmentation
+    # that bites `read -r` when pasting multi-line content)
     echo
     info "Seed each agent's fix_plan.md with 3-5 concrete starting tasks?"
-    local do_seed; do_seed=$(ask "Seed now? [Y/n]: " "Y")
+    local do_seed; do_seed=$(ask "Open each in \$EDITOR (${EDITOR:-nano}) to seed now? [Y/n]: " "Y")
     if [[ ! "$do_seed" =~ ^[Nn] ]]; then
+        local _editor="${EDITOR:-nano}"
         for i in "${!AG_NAMES[@]}"; do
             local name="${AG_NAMES[$i]}"
             local wt="$parent/${repo_name}-${name}"
-            echo
-            info "fix_plan.md for $name (one task per line; empty line to finish):"
-            local -a tasks=()
-            local line
-            while IFS= read -rp "  > " line && [ -n "$line" ]; do tasks+=("$line"); done
-            if [ "${#tasks[@]}" -gt 0 ]; then
-                {
-                    echo "# fix_plan.md — experiment queue for $name"
-                    echo
-                    for t in "${tasks[@]}"; do echo "- [ ] $t"; done
-                } > "$wt/.c3r/fix_plan.md"
-                ok "seeded ${#tasks[@]} tasks into $wt/.c3r/fix_plan.md"
-            fi
+            local fp="$wt/.c3r/fix_plan.md"
+            cat > "$fp" <<EOF
+# fix_plan.md — experiment queue for $name
+#
+# Replace this preamble with 3-5 concrete starting tasks (one per line,
+# as a markdown bullet). Lines starting with # are kept as comments.
+# Agents read the TOP of this file at the start of every iteration.
+#
+# Example format:
+#   - [ ] Task one — one full sentence, no line breaks
+#   - [ ] Task two
+#
+# Save and exit your editor when done. Empty file = agent picks its own direction.
+
+- [ ] (replace this line)
+EOF
+            info "opening $fp in $_editor..."
+            "$_editor" "$fp"
+            local line_count
+            line_count=$(grep -vc '^\s*\(#\|$\)' "$fp" 2>/dev/null || echo 0)
+            ok "saved $fp ($line_count non-empty task lines)"
         done
     fi
 

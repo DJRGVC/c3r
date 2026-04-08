@@ -111,10 +111,12 @@ while :; do
     [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null && wait "$watchdog_pid" 2>/dev/null || true
 
     if [ "$iter_ok" = 1 ]; then
+        # Context % = input_tokens / 200k. Input tokens represent what was
+        # LOADED into the window (system prompt + read files + tool results).
+        # Output tokens don't count toward in-turn context pressure; they only
+        # matter on the next turn, and each iteration is a fresh turn.
         usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
-        usage_out=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('output_tokens',0))" 2>/dev/null || echo 0)
-        total=$((usage_in + usage_out))
-        pct=$(( total * 100 / CONTEXT_WINDOW ))
+        pct=$(( usage_in * 100 / CONTEXT_WINDOW ))
         [ "$pct" -gt 100 ] && pct=100
         hb --status idle --inc-iter --context-pct "$pct"
         fail_streak=0

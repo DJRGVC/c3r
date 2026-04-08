@@ -129,8 +129,29 @@ def main() -> int:
         print("[listen] FATAL: could not fetch bot identity", file=sys.stderr); return 1
     bot_id = me["id"]
 
-    last_channel_id = None  # last seen message id in main channel
-    last_thread_ids: dict[str, str] = {}  # thread_id -> last message id
+    # Persist cursors to /tmp so a crash + restart doesn't re-ingest old
+    # messages as duplicate INBOX entries.
+    cursor_path = Path(f"/tmp/c3r_listen_{Path(state_path).parent.parent.name}.cursors.json")
+    if cursor_path.exists():
+        try:
+            saved = json.loads(cursor_path.read_text())
+            last_channel_id = saved.get("channel")
+            last_thread_ids = saved.get("threads", {})
+            print(f"[listen] restored cursors from {cursor_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"[listen] could not restore cursors: {e}", file=sys.stderr)
+            last_channel_id, last_thread_ids = None, {}
+    else:
+        last_channel_id = None
+        last_thread_ids: dict[str, str] = {}
+
+    def save_cursors():
+        try:
+            tmp = str(cursor_path) + ".tmp"
+            Path(tmp).write_text(json.dumps({"channel": last_channel_id, "threads": last_thread_ids}))
+            os.replace(tmp, cursor_path)
+        except Exception as e:
+            print(f"[listen] could not save cursors: {e}", file=sys.stderr)
 
     print(f"[listen] up — bot_id={bot_id} channel={channel}", file=sys.stderr)
     state0 = load_state(state_path)
@@ -174,6 +195,7 @@ def main() -> int:
                         req("PUT", f"/channels/{tid}/messages/{m['id']}/reactions/{urllib.parse.quote('✅')}/@me")
                     except Exception: pass
 
+            save_cursors()
         except Exception as e:
             print(f"[listen] loop error: {e}", file=sys.stderr)
         time.sleep(POLL_INTERVAL)

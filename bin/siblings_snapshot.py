@@ -69,9 +69,8 @@ def main() -> int:
     if not siblings:
         lines.append("_(no siblings in this project)_")
     else:
-        # Ensure we have fresh refs — cheap, local only
-        run(["git", "fetch", "--all", "--quiet"], cwd=repo)
-
+        # Worktrees share the same .git directory, so sibling branch refs
+        # are already up to date locally — no fetch needed.
         for sib in siblings:
             sib_branch = sib["branch"]
             lines.append(f"## {sib['name']}")
