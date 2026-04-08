@@ -256,6 +256,13 @@ def render_embed(state: dict) -> dict:
             badges.append("last iter errored")
         if badges:
             block_lines.append(f"  {' ' * (NAME_W)} {ANSI_RED}⚠ {' · '.join(badges)}{ANSI_RESET}")
+        # If the project is paused and this agent is still running, the
+        # in-flight iteration is allowed to finish (cooperative pause).
+        # Surface that to the user so they don't think pause is broken.
+        if state.get("paused") and st == "running":
+            block_lines.append(
+                f"  {' ' * (NAME_W)} {ANSI_YELLO}⏸ pausing — will halt after iter {iter_n} completes{ANSI_RESET}"
+            )
         for c in children.get(name, []):
             row(c, depth + 1)
 
