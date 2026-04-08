@@ -96,13 +96,14 @@ def _health_color(state: dict) -> int:
     return COLOR_GREEN
 
 def _ctx_glyph(pct: int) -> str:
-    """Tiny progress bar for context %."""
+    """Tiny progress bar for context %. Uses █▒ pair for uniform height
+    (see _bar10 for the rationale)."""
     if pct >= 90: return "█████"
-    if pct >= 75: return "████░"
-    if pct >= 50: return "███░░"
-    if pct >= 25: return "██░░░"
-    if pct >  0:  return "█░░░░"
-    return "░░░░░"
+    if pct >= 75: return "████▒"
+    if pct >= 50: return "███▒▒"
+    if pct >= 25: return "██▒▒▒"
+    if pct >  0:  return "█▒▒▒▒"
+    return "▒▒▒▒▒"
 
 def fetch_usage_data() -> dict | None:
     """Call claude_usage.py and return the structured data (dict) or None
@@ -120,11 +121,17 @@ def fetch_usage_data() -> dict | None:
         return None
 
 def _bar10(pct: float) -> str:
-    """10-cell unicode progress bar for embed fields."""
+    """10-cell unicode progress bar for embed fields.
+
+    Uses █ (full block) and ▒ (medium shade) — both are block-element
+    characters that fill their cell uniformly in Discord's monospace
+    font, so the bar's visual height stays consistent across filled and
+    unfilled cells. (The previous ░ light-shade rendered as sparse dots
+    that looked visibly shorter than the full blocks.)"""
     if pct is None: return "──────────"
     filled = int(round(pct / 10))
     filled = max(0, min(10, filled))
-    return "█" * filled + "░" * (10 - filled)
+    return "█" * filled + "▒" * (10 - filled)
 
 def _resets_in(ts_str: str | None) -> str:
     if not ts_str: return ""
