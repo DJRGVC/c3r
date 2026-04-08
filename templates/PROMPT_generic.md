@@ -422,66 +422,124 @@ explaining what you're spawning and why — this gives the human visibility.
 
 ## Quarto report (only if `_quarto.yml` exists at the repo root)
 
-If your project has a Quarto site (check with `test -f _quarto.yml` or
-`ls _quarto.yml`), you have an additional responsibility: maintain your
-own page at `agents/{{AGENT_NAME}}.qmd`. This is a public-facing
-research log auto-deployed to GitHub Pages — your collaborators read it.
+If your project has a Quarto site (check with `test -f _quarto.yml`),
+you have an additional responsibility: maintain your own report page
+at `agents/{{AGENT_NAME}}.qmd`. This is the **public-facing research
+log** that gets auto-deployed to GitHub Pages — collaborators read it.
+Your `RESEARCH_LOG.md` is the detailed working notes; your `.qmd` page
+is the curated highlights reel.
 
-**When to update**: not every iteration. Only when something is worth
-broadcasting to a human reader who hasn't been following your detailed
-RESEARCH_LOG.md. Good triggers:
+### Where things live (memorize these paths)
 
-- A new experiment finished with a clear positive or negative result
+```
+<repo-root>/
+├── _quarto.yml                              # site config (don't touch)
+├── index.qmd                                # landing page (human curates)
+├── agents/
+│   └── {{AGENT_NAME}}.qmd                   # ← YOUR PAGE — append entries here
+├── experiments/
+│   └── YYYY-MM-DD_short_name.qmd            # one per major experiment write-up
+├── images/
+│   ├── shared/                              # cross-agent figures
+│   └── {{AGENT_NAME}}/                      # ← YOUR images go here
+└── videos/
+    ├── shared/
+    └── {{AGENT_NAME}}/                      # ← YOUR videos go here
+```
+
+The per-agent subfolders for `images/` and `videos/` already exist —
+just commit files into them.
+
+### When to update (cadence)
+
+**Aim for at least one entry every ~10 of your iterations.** Not every
+iter is reportable, but if you go 10+ iters without touching your
+`.qmd` page, the system will inject a `QUARTO_UPDATE_NUDGE` into your
+INBOX as a reminder. You can ignore it if genuinely nothing has been
+worth reporting, but more often than not the right answer is "I should
+write up that result from a few iters ago."
+
+Good update triggers:
+- A new experiment finished with a clear result (positive or negative)
 - A design decision (architecture, hyperparameter range, library choice)
 - A milestone (phase transition, integration complete, big bug fixed)
-- An interesting finding worth flagging to a collaborator
-- A figure/plot you generated that helps explain a result
+- A figure or plot worth showing
+- Anything you'd want to send to a collaborator as a one-paragraph update
 
-**How to update**: append a new section to `agents/{{AGENT_NAME}}.qmd`
-in REVERSE chronological order (newest first, just under the front
-matter / above any older entries). Format:
+### How to update — new entry format
 
-```markdown
-## <short title> {.unnumbered}
-*Iteration N · YYYY-MM-DD*
-
-One-paragraph summary of what you did and what you found.
-
-**Result**: key metric or outcome.
-
-**Next**: what this changes about your direction.
-
-[`commit-sha`](../<repo-url>/commit/<full-sha>) · [run log](../experiments/iter_NNN.md)
-```
-
-**Adding figures**: drop the image into `images/` (e.g.
-`images/sigma_sweep_iter_017.png`), then reference it inline:
+Append to `agents/{{AGENT_NAME}}.qmd` in **reverse chronological order**
+(newest first, just below the front matter). Use this exact format so
+the listings render consistently:
 
 ```markdown
-![Sigma curriculum sweep showing best stage at σ=0.08](../images/sigma_sweep_iter_017.png){width=80%}
+## Iteration 17 — Sigma curriculum sweep {.unnumbered}
+*2026-04-08*
+
+Tested σ ∈ {0.05, 0.08, 0.13, 0.20} for the ball juggle stage transition.
+The σ=0.08 setting held best — see figure below.
+
+![Sigma curriculum sweep — best at σ=0.08](../images/{{AGENT_NAME}}/sigma_sweep_iter_017.png){width=80%}
+
+**Result**: mean episode length 142 ± 12 steps at σ=0.08, vs 95 ± 21 at σ=0.20.
+
+**Decision**: Adopt σ=0.08 for the F→G stage transition.
+
+**Next**: rerun stages C–F with the new σ, then attempt G.
+
+Commits: `abc1234`, `def5678` · See [full sweep write-up](../experiments/2026-04-08_sigma_curriculum_sweep.qmd)
 ```
 
-**Adding videos**: drop into `videos/`, then use HTML5 video:
+### Adding a figure (the most common thing)
 
-```markdown
-<video controls width="100%" src="../videos/iter_017_replay.mp4"></video>
+1. Save your plot to `images/{{AGENT_NAME}}/<descriptive_name>_iter_<NNN>.png`
+2. Reference it in your `.qmd` page with `../images/{{AGENT_NAME}}/<filename>.png`
+3. Include it in the same commit as the text update — broken image
+   refs ship to the deployed site immediately
+
+The `../` is because the agent page is in `agents/` and images are in
+`images/`. **Width tag is recommended**: `{width=80%}` for portrait
+plots, `{width=100%}` for full-width figures.
+
+### Adding a video
+
+Same pattern with HTML5:
+
+```html
+<video controls width="100%" poster="../images/{{AGENT_NAME}}/iter_17_thumb.png" src="../videos/{{AGENT_NAME}}/iter_17_replay.mp4"></video>
 ```
 
-**Significant experiment write-ups**: if a result deserves more than a
-paragraph, create `experiments/<short-name>.qmd` with full detail
-(figures, tables, raw numbers, methodology) and link to it from your
-agent page entry.
+Compress before committing (`ffmpeg -i raw.mp4 -c:v libx264 -crf 28
+-preset slow -an out.mp4`) — keep file sizes under ~10MB.
 
-**Do not**:
-- Edit other agents' pages (collision risk during publish)
-- Update Quarto report files for trivial commits
-- Skip the front matter (the listing relies on it)
-- Forget to commit the image alongside the text edit (broken refs in
-  the rendered site)
+### Major experiment write-ups
 
-The Quarto site is rebuilt and deployed automatically by the GitHub
-Actions workflow whenever you push to your branch. You don't need to
-run `quarto render` yourself.
+If a result deserves more than 3-4 paragraphs (full methodology +
+multiple figures + table of numbers + discussion), break it out into a
+dedicated experiment file:
+
+1. Create `experiments/YYYY-MM-DD_short_name.qmd` with the YAML front
+   matter (`title`, `description`, `date`, `author: "{{AGENT_NAME}}"`,
+   `categories: [...]`)
+2. Write the deep-dive there
+3. **Still** add a one-paragraph entry in `agents/{{AGENT_NAME}}.qmd`
+   that links to it: `See [full write-up](../experiments/<file>.qmd)`
+
+This way the agent listing stays scannable while detail lives in
+linked-to files.
+
+### Do not
+
+- Edit other agents' pages (`agents/<other>.qmd`) — collision risk
+  during publish
+- Update Quarto for trivial commits (refactors, log-only changes)
+- Skip the front matter on new files (listings rely on it)
+- Forget to commit the image alongside the text edit
+- Put files in `images/shared/` unless they're genuinely cross-agent —
+  use your own subfolder by default
+
+The Quarto site rebuilds + deploys automatically. You don't run
+`quarto render` yourself; the GitHub Action handles it.
 
 ## Each iteration, in order
 

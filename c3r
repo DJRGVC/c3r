@@ -2048,14 +2048,17 @@ cmd_report_init() {
     cp "$QUARTO_TPL/references.qmd"             "$target/references.qmd"
     cp "$QUARTO_TPL/styles.css"                 "$target/styles.css"
 
-    # Subdirectories
-    mkdir -p "$target/agents" "$target/images" "$target/videos" "$target/experiments"
+    # Subdirectories with shared/ + per-agent subfolders so locations are obvious
+    mkdir -p "$target/agents" "$target/images/shared" "$target/videos/shared" "$target/experiments"
     cp "$QUARTO_TPL/agents/index.qmd"           "$target/agents/index.qmd"
-    touch "$target/images/.gitkeep" "$target/videos/.gitkeep" "$target/experiments/.gitkeep"
+    cp "$QUARTO_TPL/images/README.md"           "$target/images/README.md"
+    cp "$QUARTO_TPL/videos/README.md"           "$target/videos/README.md"
+    cp "$QUARTO_TPL/experiments/README.md"      "$target/experiments/README.md"
+    touch "$target/images/shared/.gitkeep" "$target/videos/shared/.gitkeep"
 
-    # Per-agent pages, one per active agent
+    # Per-agent pages + per-agent media subfolders, one per active agent
     if [ -f "$target/.c3r/state.json" ]; then
-        info "seeding per-agent pages from state.json"
+        info "seeding per-agent pages + media subfolders from state.json"
         python3 - "$target/.c3r/state.json" "$target" "$QUARTO_TPL/agents/_template.qmd" <<'PY'
 import json, sys, pathlib
 state_path, target, tpl_path = sys.argv[1:]
@@ -2064,17 +2067,26 @@ tpl = pathlib.Path(tpl_path).read_text()
 created = 0
 for a in state.get("agents", []):
     if a.get("status") == "stopped": continue
-    out = pathlib.Path(target) / "agents" / f"{a['name']}.qmd"
-    if out.exists(): continue
-    page = (tpl
-        .replace("{{AGENT_NAME}}", a["name"])
-        .replace("{{AGENT_ROLE}}", a.get("role", "?"))
-        .replace("{{AGENT_MODEL}}", a.get("model", "?"))
-        .replace("{{AGENT_FOCUS}}", a.get("focus", "(no focus set)")))
-    out.write_text(page)
-    created += 1
-    print(f"  created agents/{a['name']}.qmd", file=sys.stderr)
-print(f"  seeded {created} agent page(s)", file=sys.stderr)
+    name = a["name"]
+    # Page
+    out = pathlib.Path(target) / "agents" / f"{name}.qmd"
+    if not out.exists():
+        page = (tpl
+            .replace("{{AGENT_NAME}}", name)
+            .replace("{{AGENT_ROLE}}", a.get("role", "?"))
+            .replace("{{AGENT_MODEL}}", a.get("model", "?"))
+            .replace("{{AGENT_FOCUS}}", a.get("focus", "(no focus set)")))
+        out.write_text(page)
+        created += 1
+        print(f"  created agents/{name}.qmd", file=sys.stderr)
+    # Per-agent media folders
+    for sub in ("images", "videos"):
+        d = pathlib.Path(target) / sub / name
+        d.mkdir(parents=True, exist_ok=True)
+        keep = d / ".gitkeep"
+        if not keep.exists():
+            keep.write_text("")
+print(f"  seeded {created} agent page(s) + per-agent media subfolders", file=sys.stderr)
 PY
     fi
 
