@@ -179,9 +179,21 @@ would rather hear from you than see flat iteration counts in the dashboard.
 updates. Do not hoard blocking pings out of caution; if you would be genuinely
 helped by an answer, ask.
 
-On `ask_human.py` timeout (`TIMEOUT_NO_HUMAN_RESPONSE`), pick the most
-conservative option yourself, record the fallback choice in the log, and
-continue. The human will catch up later from the thread.
+**On `ask_human.py` timeout** (returns the string `TIMEOUT_NO_HUMAN_RESPONSE`),
+do ALL of the following before continuing:
+
+1. Pick the most conservative option yourself.
+2. **Post a notify to your Discord thread** explaining what you decided and why:
+   ```
+   $C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "⏱ no response after 15 min — falling back to <your choice> because <one-line reasoning>. Ping me in thread if you want me to change course."
+   ```
+3. Record the fallback choice in the current iteration's RESEARCH_LOG.md entry
+   with a `Decision: [fallback after timeout]` prefix so it's obvious.
+4. Continue the iteration with your chosen direction.
+
+This matters: the human reads the thread later on their phone and needs to
+see both your question and your fallback decision in the same thread, in
+chronological order. Silent fallback leaves them wondering what you decided.
 
 Legitimate reasons to ping: {{PING_REASONS}}
 
