@@ -119,15 +119,13 @@ def _resets_in(ts_str: str | None) -> str:
         return ""
 
 def _usage_fields(usage: dict | None) -> list:
-    """Build embed fields for plan + usage windows. Returns [] if no data."""
+    """Build embed fields for usage windows (no plan field — that's in the title).
+    Returns [] if no data."""
     if not usage: return []
-    plan = usage.get("plan", "?")
     fh = usage.get("five_hour") or {}
     sd = usage.get("seven_day") or {}
     sd_son = usage.get("seven_day_sonnet") or {}
     sd_opus = usage.get("seven_day_opus") or {}
-
-    fields = [{"name": "Plan", "value": f"**{plan}**", "inline": True}]
 
     def fmt_window(label, w):
         p = w.get("utilization")
@@ -137,18 +135,15 @@ def _usage_fields(usage: dict | None) -> list:
         body = f"`{bar}`\n**{p:.0f}%**" + (f" · resets {rel}" if rel else "")
         return {"name": label, "value": body, "inline": True}
 
-    for label, w in (("5h window", fh), ("7d window", sd)):
+    fields = []
+    for label, w in (("5h window", fh), ("7d window", sd), ("7d · sonnet", sd_son)):
         f = fmt_window(label, w)
         if f: fields.append(f)
-    # Per-model on a second row
-    son = fmt_window("7d · sonnet", sd_son)
     opus = fmt_window("7d · opus", sd_opus)
-    if son or opus:
-        # Discord embed inline fields are 3 per row; pad to keep alignment
-        if son: fields.append(son)
-        if opus: fields.append(opus)
-        if (son and not opus) or (opus and not son):
-            fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
+    if opus: fields.append(opus)
+    # Pad to fill the row so the agent field below starts on a clean line
+    while len(fields) % 3 != 0:
+        fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
     return fields
 
 def _rel_time(ts_str: str | None) -> str:
@@ -170,11 +165,9 @@ def render_embed(state: dict) -> dict:
     active_n = sum(1 for a in agents if a.get("status") != "stopped")
     stopped_n = sum(1 for a in agents if a.get("status") == "stopped")
 
-    # Description = capacity + paused badge only; usage gets its own fields
+    # Description = paused badge ONLY (or empty). The agent count moves
+    # to the bottom of the agent field for a cleaner top→bottom flow.
     desc_lines = []
-    capacity = f"`{active_n}/{cap}` active agents"
-    if stopped_n: capacity += f" · `{stopped_n}` stopped"
-    desc_lines.append(capacity)
     if state.get("paused"):
         desc_lines.append("⏸ **PAUSED** — agents will halt after their current iteration")
 
@@ -184,9 +177,9 @@ def render_embed(state: dict) -> dict:
     for a in agents:
         children.setdefault(a.get("parent"), []).append(a["name"])
 
+    # Tighter table — drop the STATUS text column (emoji shows it),
+    # drop "ago" from LAST (less noise), give names a bit more room
     table_lines = []
-    table_lines.append(f"{'AGENT':<22}{'STATUS':<10}{'MODEL':<8}{'ITER':<6}{'CTX':<10}{'LAST':<10}")
-    table_lines.append("─" * 66)
 
     def row(name, depth):
         a = by_name[name]
@@ -196,23 +189,31 @@ def render_embed(state: dict) -> dict:
         iter_n = f"#{a.get('last_iter', 0)}"
         ctx = a.get("last_context_pct", 0)
         ctx_str = f"{_ctx_glyph(ctx)} {ctx:>3}%"
-        rel = _rel_time(a.get("last_iter_ts"))
+        rel = _rel_time(a.get("last_iter_ts")).replace(" ago", "")
         prefix = "  " * depth + ("└ " if depth > 0 else "")
         label = f"{e} {prefix}{a['name']}"[:22]
-        table_lines.append(f"{label:<22}{st:<10}{model_short:<8}{iter_n:<6}{ctx_str:<10}{rel:<10}")
-        # Health badges below the row when notable
+        table_lines.append(f"{label:<22} {model_short:<6} {iter_n:<5} {ctx_str:<10} {rel:>6}")
+        # Inline warnings under the row when notable
         badges = []
         if a.get("fail_streak", 0) >= 3:
             badges.append(f"⚠ fail_streak={a['fail_streak']}")
         if ctx >= 75 and st != "stopped":
             badges.append(f"⚠ context near full")
+        if a.get("status") == "error":
+            badges.append("⚠ last iter errored")
         if badges:
-            table_lines.append(f"{' ' * 22}{' · '.join(badges)}")
+            table_lines.append(f"{' ' * 22} {' · '.join(badges)}")
         for c in children.get(name, []):
             row(c, depth + 1)
 
     for root in children.get(None, []):
         row(root, 0)
+
+    # Capacity line goes UNDER the agents inside the same code block
+    cap_str = f"{active_n}/{cap} active"
+    if stopped_n: cap_str += f" · {stopped_n} stopped"
+    table_lines.append("─" * 56)
+    table_lines.append(cap_str)
 
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
 
@@ -226,12 +227,13 @@ def render_embed(state: dict) -> dict:
     embed = {
         "title": f"c3r · {state['project']}",
         "color": _health_color(state),
-        "description": "\n".join(desc_lines),
         "fields": fields,
         "footer": {
             "text": f"updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ·  auto-refresh 60s"
         },
     }
+    if desc_lines:
+        embed["description"] = "\n".join(desc_lines)
     return embed
 
 # Backwards-compatible plain-text renderer (used by `c3r status` console output).
