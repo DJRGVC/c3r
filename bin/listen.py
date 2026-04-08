@@ -139,21 +139,31 @@ def main() -> int:
         print("[listen] FATAL: could not fetch bot identity", file=sys.stderr); return 1
     bot_id = me["id"]
 
-    # Persist cursors to /tmp so a crash + restart doesn't re-ingest old
-    # messages as duplicate INBOX entries.
+    # On startup, advance every cursor to the current latest message so a
+    # restart never re-processes pre-restart messages. The /tmp cursor file
+    # was originally meant for crash recovery but caused duplicate processing
+    # on intentional restarts (the file was older than the latest message
+    # in the channel, so the new listener re-saw recent !c3r commands and
+    # re-processed them, double-acking the user's pause/resume).
     cursor_path = Path(f"/tmp/c3r_listen_{Path(state_path).parent.parent.name}.cursors.json")
-    if cursor_path.exists():
+    last_channel_id = None
+    last_thread_ids: dict[str, str] = {}
+    try:
+        latest = req("GET", f"/channels/{channel}/messages?limit=1") or []
+        if latest:
+            last_channel_id = latest[0]["id"]
+            print(f"[listen] startup cursor: channel @ {last_channel_id}", file=sys.stderr)
+    except Exception as e:
+        print(f"[listen] could not fetch latest channel msg: {e}", file=sys.stderr)
+    state_initial = load_state(state_path)
+    for a in state_initial.get("agents", []):
+        tid = a.get("thread_id")
+        if not tid: continue
         try:
-            saved = json.loads(cursor_path.read_text())
-            last_channel_id = saved.get("channel")
-            last_thread_ids = saved.get("threads", {})
-            print(f"[listen] restored cursors from {cursor_path}", file=sys.stderr)
-        except Exception as e:
-            print(f"[listen] could not restore cursors: {e}", file=sys.stderr)
-            last_channel_id, last_thread_ids = None, {}
-    else:
-        last_channel_id = None
-        last_thread_ids: dict[str, str] = {}
+            latest = req("GET", f"/channels/{tid}/messages?limit=1") or []
+            if latest:
+                last_thread_ids[tid] = latest[0]["id"]
+        except Exception: pass
 
     def save_cursors():
         try:

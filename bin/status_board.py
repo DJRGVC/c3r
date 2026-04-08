@@ -191,8 +191,8 @@ def render_embed(state: dict) -> dict:
         ctx_str = f"{_ctx_glyph(ctx)} {ctx:>3}%"
         rel = _rel_time(a.get("last_iter_ts")).replace(" ago", "")
         prefix = "  " * depth + ("└ " if depth > 0 else "")
-        label = f"{e} {prefix}{a['name']}"[:22]
-        table_lines.append(f"{label:<22} {model_short:<6} {iter_n:<5} {ctx_str:<10} {rel:>6}")
+        label = f"{e} {prefix}{a['name']}"[:24]
+        table_lines.append(f"{label:<24}  {model_short:<6}  {iter_n:<5}  {ctx_str}")
         # Inline warnings under the row when notable
         badges = []
         if a.get("fail_streak", 0) >= 3:
@@ -212,7 +212,7 @@ def render_embed(state: dict) -> dict:
     # Capacity line goes UNDER the agents inside the same code block
     cap_str = f"{active_n}/{cap} active"
     if stopped_n: cap_str += f" · {stopped_n} stopped"
-    table_lines.append("─" * 56)
+    table_lines.append("─" * 50)
     table_lines.append(cap_str)
 
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
