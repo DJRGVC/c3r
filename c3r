@@ -31,6 +31,13 @@ save_config() {
 export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 export DISCORD_CHANNEL_ID="${DISCORD_CHANNEL_ID:-}"
 export DISCORD_USER_ID="${DISCORD_USER_ID:-}"
+# Plan tier for usage % calculation in watch. One of:
+#   pro       — \$20/mo, ~\$30/wk effective Sonnet equivalent
+#   max-5x    — \$100/mo, ~\$150/wk effective
+#   max-20x   — \$200/mo, ~\$600/wk effective
+#   api       — pay-as-you-go (no weekly cap)
+#   unknown   — show absolute spend without budget %
+export C3R_PLAN="${C3R_PLAN:-unknown}"
 EOF
     chmod 600 "$CONFIG_FILE"
     ok "saved config → $CONFIG_FILE"
@@ -625,12 +632,23 @@ Steps (one-time, ~5 minutes):
 
 EOF
     load_config
-    local tok cid uid
+    local tok cid uid plan
     tok=$(ask "Discord bot token [${DISCORD_BOT_TOKEN:+keep existing}]: " "${DISCORD_BOT_TOKEN:-}")
     cid=$(ask "Project channel ID [${DISCORD_CHANNEL_ID:-}]: " "${DISCORD_CHANNEL_ID:-}")
     uid=$(ask "Your Discord user ID [${DISCORD_USER_ID:-}]: " "${DISCORD_USER_ID:-}")
     [ -n "$tok" ] && [ -n "$cid" ] && [ -n "$uid" ] || die "all three values required"
-    export DISCORD_BOT_TOKEN="$tok" DISCORD_CHANNEL_ID="$cid" DISCORD_USER_ID="$uid"
+    cat <<'EOF'
+
+Claude plan tier (used to compute % budget in 'c3r watch'):
+  pro       — $20/mo
+  max-5x    — $100/mo
+  max-20x   — $200/mo
+  api       — pay-as-you-go
+  unknown   — skip budget % display
+EOF
+    plan=$(ask "Plan [${C3R_PLAN:-max-5x}]: " "${C3R_PLAN:-max-5x}")
+    case "$plan" in pro|max-5x|max-20x|api|unknown) ;; *) warn "unknown plan name '$plan'; saving anyway" ;; esac
+    export DISCORD_BOT_TOKEN="$tok" DISCORD_CHANNEL_ID="$cid" DISCORD_USER_ID="$uid" C3R_PLAN="$plan"
     save_config
 }
 
@@ -1025,6 +1043,38 @@ except OSError:
 bar = "─" * min(cols, 100)
 paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
 print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
+
+# ---- Plan + cost line ----
+plan = os.environ.get("C3R_PLAN", "unknown")
+# Effective weekly $ budget per plan (rough; absolute hard caps are time-based,
+# these dollar values are conservative estimates from published Anthropic docs)
+PLAN_BUDGETS = {"pro": 30.0, "max-5x": 150.0, "max-20x": 600.0, "api": None, "unknown": None}
+budget = PLAN_BUDGETS.get(plan)
+usage_path = os.path.expanduser("~/.config/c3r/usage.json")
+week_total = 0.0
+month_total = 0.0
+if os.path.exists(usage_path):
+    try:
+        u = json.load(open(usage_path))
+        from datetime import date
+        iso_y, iso_w, _ = date.today().isocalendar()
+        week_key = f"{iso_y}-W{iso_w:02d}"
+        week_total = sum(u.get(week_key, {}).values()) if isinstance(u.get(week_key), dict) else 0.0
+        # Sum the last 30 daily entries for "month"
+        for day_key, models in (u.get("daily") or {}).items():
+            if isinstance(models, dict):
+                month_total += sum(models.values())
+    except Exception: pass
+plan_str = f"plan: {BOLD}{plan}{RESET}"
+if budget and week_total > 0:
+    pct = (week_total / budget) * 100
+    pct_col = GREEN if pct < 50 else YELLOW if pct < 80 else RED
+    cost_str = f"week: ${week_total:.2f} ({pct_col}{pct:.0f}%{RESET} of ~${budget:.0f} est)  ·  month: ${month_total:.2f}"
+elif budget:
+    cost_str = f"week: $0.00 (0% of ~${budget:.0f} est)  ·  month: ${month_total:.2f}"
+else:
+    cost_str = f"week: ${week_total:.2f}  ·  month: ${month_total:.2f}"
+print(f"{plan_str}  ·  {cost_str}")
 print(bar)
 cap = s.get("max_agents", "?")
 active_n = sum(1 for a in s["agents"] if a.get("status") != "stopped")
