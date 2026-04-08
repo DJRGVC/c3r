@@ -103,8 +103,20 @@ def get_recent_messages(token: str, channel_id: str, after_id: str | None) -> li
 
 # ---------- Modes ----------
 
+def _question_banner(question: str, deadline: float) -> str:
+    """Make agent questions visually unmistakable in the Discord thread."""
+    agent = os.environ.get("C3R_AGENT_NAME", "agent")
+    timeout_min = int((deadline - time.time()) / 60)
+    return (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"❓ **QUESTION from `{agent}`**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{question}\n\n"
+        f"*Reply in this thread within {timeout_min} min, or I'll pick a fallback and post my decision here.*"
+    )
+
 def free_text(token: str, channel_id: str, user_id: str, question: str, deadline: float) -> str:
-    header_id = send_message(token, channel_id, f"> {question}\n\n*Reply here. Timeout: {int((deadline - time.time()) / 60)} min.*")
+    header_id = send_message(token, channel_id, _question_banner(question, deadline))
     while time.time() < deadline:
         msgs = get_recent_messages(token, channel_id, after_id=header_id)
         # Discord returns newest first when paginating by after; filter to user, pick oldest new
@@ -119,14 +131,21 @@ def free_text(token: str, channel_id: str, user_id: str, question: str, deadline
 
 
 def _render_choices(question: str, choices: list[str], multi: bool) -> str:
-    lines = [f"> {question}", ""]
+    agent = os.environ.get("C3R_AGENT_NAME", "agent")
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"❓ **QUESTION from `{agent}`**",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        question,
+        "",
+    ]
     for i, c in enumerate(choices):
         lines.append(f"{LETTER_EMOJI[i]}  {c}")
     lines.append("")
     if multi:
         lines.append(f"*Tap all that apply, then tap {SUBMIT_EMOJI} to submit.*")
     else:
-        lines.append("*Tap one reaction to answer.*")
+        lines.append("*Tap one reaction to answer. I'll pick a fallback if you don't reply within 15 min.*")
     return "\n".join(lines)
 
 
