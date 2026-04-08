@@ -91,7 +91,9 @@ ${BOLD}RUNNING${RESET}
   status [path]           print local status + nudge Discord board
 
 ${BOLD}AGENT MANAGEMENT${RESET}
-  add-agent [path] ...    add a new agent to an existing project
+  add-agent [path] ...    add a new agent to an existing project (alias of spawn)
+  spawn [path] <n> <role> "<focus>"   dynamically create a new agent
+  kill [path] <name>      stop an agent's loop (non-destructive; keeps artifacts)
   reset [path] <name>     delete an agent's worktree + branch (destructive)
   logs [path] [agent]     tail RESEARCH_LOG.md for one or all agents
 
@@ -246,20 +248,56 @@ Example:
   c3r ping policy "try the sigma curriculum from the Portela 2025 paper next"
 EOF
         ;;
-    add-agent) cat <<'EOF'
-c3r add-agent [TARGET_REPO] NAME [--role ROLE] [--model MODEL] [--focus "..."]
+    add-agent|spawn) cat <<'EOF'
+c3r spawn [TARGET_REPO] NAME ROLE "FOCUS" [--model MODEL] [--parent NAME]
+c3r add-agent <same arguments>    (alias of spawn)
 
-Adds a new agent to an existing project:
-  1. Creates a new git worktree + branch (agent/NAME)
-  2. Seeds its .c3r/ dir from the chosen role template
-  3. Appends the agent to state.json
-  4. Creates a new Discord thread off the status board for the agent
-  5. Updates the status board
+Dynamically add a new agent to a project (mid-run is fine):
+  1. Checks the max_agents cap in state.json. If at the cap, fails with a clear
+     message and exits non-zero so a caller (e.g. another agent) can react.
+  2. Creates a new git worktree at <parent>/<repo>-<NAME> on branch agent/NAME.
+  3. Seeds its .c3r/ dir from the chosen role template, substituting FOCUS.
+  4. Creates a new standalone public thread in the Discord channel.
+  5. Appends the agent to state.json (with optional parent field).
+  6. If the project's tmux session is running, adds a new window to it
+     running agent_loop.sh for the new agent — the agent is LIVE immediately.
+  7. Updates the status board.
 
-Does NOT auto-launch — restart the tmux session with `c3r stop && c3r launch`
-to bring the new agent online, or manually run agent_loop.sh in a new window.
+ROLE: generic | literature | coding | writing | custom
+MODEL: claude-sonnet-4-6 (default) | claude-opus-4-6 | claude-haiku-4-5-20251001
+PARENT: name of the spawning agent (optional, for tracking lineage in watch)
 
-Role defaults to generic. Model defaults to claude-sonnet-4-6.
+This command is intended to be called either by you from the CLI, or by an
+agent from within its own iteration (via $C3R_BIN/c3r spawn ...) when it
+decides a bounded sub-task warrants a dedicated worker.
+
+Example:
+  c3r spawn reader literature "read and summarize the Portela 2025 paper"
+EOF
+        ;;
+    kill) cat <<'EOF'
+c3r kill [TARGET_REPO] AGENT_NAME
+
+Non-destructively stops an agent:
+  1. Kills the agent's tmux window so the loop stops at its next iteration.
+  2. Sets the agent's status to "stopped" in state.json.
+  3. Posts a farewell message in the agent's Discord thread.
+  4. Updates the status board.
+
+Preserves:
+  - The git worktree (<parent>/<repo>-<name>)
+  - The branch (agent/<name>) and all commits
+  - The Discord thread and its history
+  - The agent's RESEARCH_LOG.md and INBOX_ARCHIVE.md
+
+To restart a killed agent: re-add its tmux window manually, or `c3r reset`
+followed by `c3r spawn` to get a fresh slate.
+
+To fully delete an agent (destructive): see `c3r help reset`.
+
+This command is intended to be called by the human when an agent's task is
+done, or by an agent itself (`$C3R_BIN/c3r kill $C3R_AGENT_NAME`) when it
+detects its spawned sub-task is complete.
 EOF
         ;;
     reset) cat <<'EOF'
@@ -569,6 +607,17 @@ cmd_init() {
 EOF
     local gpu_mode; gpu_mode=$(ask "GPU lock [serial]: " "serial")
 
+    echo
+    info "Agent hierarchy cap"
+    cat <<'EOF'
+  Top-level agents can spawn sub-agents (children) for bounded tasks. The cap
+  below is the TOTAL number of agents that can exist at once (top-level +
+  children combined). When hit, further `c3r spawn` calls fail with an error
+  so the caller can decide to wait or kill another agent.
+EOF
+    local max_agents; max_agents=$(ask "Max parallel agents cap [4]: " "4")
+    [[ "$max_agents" =~ ^[1-9][0-9]*$ ]] || die "max_agents must be a positive integer"
+
     # Discord creds
     echo
     load_config
@@ -606,6 +655,7 @@ parent = "$(dirname "$target")"; repo_name = "$(basename "$target")"
 for n, r, m, f in zip(names, roles, models, foci):
     agents.append({
         "name": n, "role": r, "model": m, "focus": f,
+        "parent": None,
         "branch": f"agent/{n}",
         "worktree": f"{parent}/{repo_name}-{n}",
         "thread_id": None, "status": "idle",
@@ -617,6 +667,7 @@ state = {
     "channel_id": "$DISCORD_CHANNEL_ID",
     "board_message_id": None,
     "gpu_lock": "$gpu_mode",
+    "max_agents": $max_agents,
     "paused": False,
     "agents": agents,
 }
@@ -783,9 +834,19 @@ bar = "─" * min(cols, 100)
 paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
 print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
 print(bar)
-hdr = f"{BOLD}{'':2}{'AGENT':<14}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'CTX%':>5}  {'LAST':<12}{'FAIL':>5}{RESET}"
+cap = s.get("max_agents", "?")
+total = len(s["agents"])
+print(f"{BOLD}agents:{RESET} {total}/{cap}")
+hdr = f"{BOLD}{'':2}{'AGENT':<18}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'CTX%':>5}  {'LAST':<12}{'FAIL':>5}{RESET}"
 print(hdr)
+
+# Build parent→children index and render as a tree (DFS)
+by_name = {a["name"]: a for a in s["agents"]}
+children = {}
 for a in s["agents"]:
+    children.setdefault(a.get("parent"), []).append(a["name"])
+def render(agent_name, depth):
+    a = by_name[agent_name]
     st = a.get("status","idle")
     icon = ICON.get(st, "·")
     model = a.get("model","").replace("claude-","").replace("-4-6","").replace("-4-5-20251001","")[:10]
@@ -802,7 +863,13 @@ for a in s["agents"]:
         except Exception: pass
     fail = a.get("fail_streak",0)
     fail_col = RED if fail>=3 else YELLOW if fail>0 else ""
-    print(f"  {icon} {a['name']:<12} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
+    indent = ("  " + "  " * depth) + ("└─ " if depth > 0 else "")
+    name_field = f"{indent}{a['name']}"[:18]
+    print(f"{icon} {name_field:<18} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
+    for child in children.get(a["name"], []):
+        render(child, depth + 1)
+for root in children.get(None, []):
+    render(root, 0)
 print(bar)
 
 # ---- INBOX panel: latest 3 messages across all agents, with responses ----
@@ -1008,9 +1075,202 @@ PY
 # add-agent / reset / board / update
 # ------------------------------------------------------------------
 
-cmd_add_agent() {
-    warn "add-agent: not yet implemented in this build — edit state.json and run 'c3r stop && c3r launch' manually"
-    return 1
+cmd_spawn() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+
+    local name="${1:?usage: c3r spawn NAME ROLE \"FOCUS\" [--model M]}"; shift
+    local role="${1:?role required}"; shift
+    local focus="${1:?focus required}"; shift
+    local model="claude-sonnet-4-6"
+    local parent_override=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --model) model="$2"; shift 2 ;;
+            --parent) parent_override="$2"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid name: letters/digits/dash/underscore only"
+
+    # Determine parent: explicit flag > env (auto when called from an agent) > none
+    local parent="$parent_override"
+    [ -z "$parent" ] && parent="${C3R_AGENT_NAME:-}"
+
+    # Enforce max_agents cap
+    python3 - "$state" "$name" "$parent" <<'PY'
+import json, sys
+sp, name, parent = sys.argv[1], sys.argv[2], sys.argv[3]
+s = json.load(open(sp))
+if any(a["name"] == name for a in s["agents"]):
+    print(f"[spawn] agent '{name}' already exists", file=sys.stderr); sys.exit(2)
+cap = s.get("max_agents", 4)
+if len(s["agents"]) >= cap:
+    print(f"[spawn] max_agents cap reached ({cap}) — kill an agent first", file=sys.stderr); sys.exit(3)
+if parent and not any(a["name"] == parent for a in s["agents"]):
+    print(f"[spawn] parent '{parent}' does not exist", file=sys.stderr); sys.exit(4)
+PY
+    local rc=$?
+    [ "$rc" -ne 0 ] && return $rc
+
+    # Create worktree
+    local parent_dir; parent_dir="$(dirname "$target")"
+    local repo_name; repo_name="$(basename "$target")"
+    local wt="$parent_dir/${repo_name}-${name}"
+    local branch="agent/$name"
+    ( cd "$target" && {
+        git show-ref --verify --quiet "refs/heads/$branch" || git branch "$branch" HEAD
+        git worktree add "$wt" "$branch" 2>/dev/null || git worktree add --force "$wt" "$branch"
+    } ) || die "worktree creation failed"
+
+    # Seed .c3r/
+    mkdir -p "$wt/.c3r"
+    local tpl="$C3R_DIR/templates/PROMPT_${role}.md"
+    [ -f "$tpl" ] || tpl="$C3R_DIR/templates/PROMPT_generic.md"
+    local siblings="(see state.json)"
+    render_prompt "$tpl" "$wt/.c3r/PROMPT.md" "$name" "$role" "$focus" "$siblings" "(agent-defined)" "(sibling-owned)" "1"
+    cp "$C3R_DIR/templates/fix_plan.md"     "$wt/.c3r/fix_plan.md"
+    cp "$C3R_DIR/templates/RESEARCH_LOG.md" "$wt/.c3r/RESEARCH_LOG.md"
+    cp "$C3R_DIR/templates/INBOX.md"        "$wt/.c3r/INBOX.md"
+    printf '# INBOX ARCHIVE\n' > "$wt/.c3r/INBOX_ARCHIVE.md"
+    write_agent_conf "$wt" "$name" "$role" "$model"
+
+    # Create Discord thread
+    python3 - "$state" "$name" "$role" "$model" "$focus" "$wt" "$parent" <<'PY'
+import json, os, sys, urllib.request
+sp, name, role, model, focus, wt, parent = sys.argv[1:]
+parent = parent or None
+s = json.load(open(sp))
+token = os.environ["DISCORD_BOT_TOKEN"]; channel = s["channel_id"]
+# Create standalone public thread
+req = urllib.request.Request(f"https://discord.com/api/v10/channels/{channel}/threads",
+    data=json.dumps({"name": name, "type": 11, "auto_archive_duration": 10080}).encode(),
+    method="POST")
+req.add_header("Authorization", f"Bot {token}")
+req.add_header("Content-Type", "application/json")
+req.add_header("User-Agent", "c3r-spawn (0.1)")
+with urllib.request.urlopen(req, timeout=30) as r:
+    thread = json.loads(r.read())
+# Welcome message
+parent_line = f" · spawned by **{parent}**" if parent else ""
+wreq = urllib.request.Request(f"https://discord.com/api/v10/channels/{thread['id']}/messages",
+    data=json.dumps({"content": f"**{name}** — {role} · `{model}`{parent_line}\nFocus: {focus}\n\nReply here to send the agent an INBOX message."}).encode(),
+    method="POST")
+wreq.add_header("Authorization", f"Bot {token}")
+wreq.add_header("Content-Type", "application/json")
+wreq.add_header("User-Agent", "c3r-spawn (0.1)")
+urllib.request.urlopen(wreq, timeout=30).read()
+# Append to state
+s["agents"].append({
+    "name": name, "role": role, "model": model, "focus": focus,
+    "parent": parent,
+    "branch": f"agent/{name}", "worktree": wt,
+    "thread_id": thread["id"], "status": "idle",
+    "last_iter": 0, "last_iter_ts": None,
+    "last_context_pct": 0, "fail_streak": 0,
+})
+json.dump(s, open(sp, "w"), indent=2)
+# Write thread id back to agent.conf
+conf_path = os.path.join(wt, ".c3r/agent.conf")
+lines = open(conf_path).read().splitlines()
+out = []
+for line in lines:
+    if line.startswith("C3R_AGENT_THREAD_ID="):
+        out.append(f'C3R_AGENT_THREAD_ID="{thread["id"]}"')
+    else:
+        out.append(line)
+open(conf_path, "w").write("\n".join(out) + "\n")
+print(thread["id"])
+PY
+
+    # If tmux session is live, add a window for the new agent
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+    if tmux has-session -t "$session" 2>/dev/null; then
+        local thread_id; thread_id="$(python3 -c "import json;s=json.load(open('$state'));print([a['thread_id'] for a in s['agents'] if a['name']=='$name'][0])")"
+        local env_cmd="cd '$wt' && \
+export C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$state' \
+C3R_AGENT_NAME='$name' C3R_WORKTREE='$wt' \
+C3R_AGENT_THREAD_ID='$thread_id' \
+DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' \
+DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' \
+DISCORD_USER_ID='$DISCORD_USER_ID' && \
+'$C3R_BIN/agent_loop.sh'"
+        tmux new-window -t "$session" -n "$name" "bash -lc \"$env_cmd\""
+        ok "spawned $name → live in tmux session $session"
+    else
+        ok "spawned $name (tmux session not running — start with 'c3r launch')"
+    fi
+
+    "$C3R_BIN/status_board.py" update --state "$state" || true
+}
+
+cmd_add_agent() { cmd_spawn "$@"; }
+
+cmd_kill() {
+    load_config
+    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+    local name="${1:?usage: c3r kill AGENT_NAME}"
+
+    # Compute the set of agents to kill: target + all descendants
+    # Enforce permission: if called from an agent (C3R_AGENT_NAME set), the
+    # target must be self or a descendant of self.
+    local caller="${C3R_AGENT_NAME:-}"
+    local to_kill; to_kill=$(python3 - "$state" "$name" "$caller" <<'PY'
+import json, sys
+sp, target, caller = sys.argv[1:]
+s = json.load(open(sp))
+by_name = {a["name"]: a for a in s["agents"]}
+if target not in by_name:
+    print(f"ERR: no such agent: {target}", file=sys.stderr); sys.exit(2)
+# Compute descendants
+def descendants(n):
+    out = [n]
+    for a in s["agents"]:
+        if a.get("parent") == n:
+            out += descendants(a["name"])
+    return out
+kill_set = descendants(target)
+# Permission check for agent callers
+if caller:
+    # caller may only kill self or a descendant of self
+    caller_desc = set(descendants(caller))
+    if target not in caller_desc and target != caller:
+        print(f"ERR: agent '{caller}' cannot kill '{target}' (not in its subtree)", file=sys.stderr); sys.exit(3)
+print(" ".join(kill_set))
+PY
+)
+    local rc=$?; [ "$rc" -ne 0 ] && return $rc
+    [ -z "$to_kill" ] && die "nothing to kill"
+
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+    for agent in $to_kill; do
+        # Kill tmux window if session exists
+        if tmux has-session -t "$session" 2>/dev/null; then
+            tmux kill-window -t "$session:$agent" 2>/dev/null || true
+        fi
+        # Farewell in thread + mark stopped in state.json
+        python3 - "$state" "$agent" <<'PY'
+import json, os, sys, subprocess
+sp, name = sys.argv[1:]
+s = json.load(open(sp))
+agent = next((a for a in s["agents"] if a["name"] == name), None)
+if not agent: sys.exit(0)
+agent["status"] = "stopped"
+json.dump(s, open(sp, "w"), indent=2)
+# Farewell post
+if agent.get("thread_id"):
+    subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/bin/notify.py",
+                    "--thread", agent["thread_id"],
+                    "🛑 Agent stopped. Worktree and history preserved."],
+                   check=False, cwd=os.path.dirname(os.path.realpath(__file__)))
+PY
+        ok "killed $agent"
+    done
+    "$C3R_BIN/status_board.py" update --state "$state" || true
 }
 
 cmd_reset() {
@@ -1076,6 +1336,8 @@ case "$cmd" in
     ask)       cmd_ask       "$@" ;;
     ping)      cmd_ping      "$@" ;;
     add-agent) cmd_add_agent "$@" ;;
+    spawn)     cmd_spawn     "$@" ;;
+    kill)      cmd_kill      "$@" ;;
     reset)     cmd_reset     "$@" ;;
     update)    cmd_update    "$@" ;;
     uninstall) cmd_uninstall "$@" ;;

@@ -57,12 +57,19 @@ def req(method: str, path: str, body=None):
 STATUS_EMOJI = {"idle": "⚪", "running": "🟢", "paused": "⏸", "error": "🔴", "stopped": "⚫"}
 
 def render(state: dict) -> str:
-    lines = [f"## c3r · {state['project']}"]
+    cap = state.get("max_agents", "?")
+    total = len(state["agents"])
+    lines = [f"## c3r · {state['project']}   `{total}/{cap} agents`"]
     if state.get("paused"):
         lines.append("**⏸ PAUSED** — agents will finish current iteration then halt.")
     lines.append("```")
-    lines.append(f"{'AGENT':<14} {'STATUS':<8} {'MODEL':<10} {'ITER':<7} {'CTX%':>5} {'LAST':<16}")
+    lines.append(f"{'AGENT':<18} {'STATUS':<8} {'MODEL':<10} {'ITER':<7} {'CTX%':>5} {'LAST':<10}")
+    by_name = {a["name"]: a for a in state["agents"]}
+    children = {}
     for a in state["agents"]:
+        children.setdefault(a.get("parent"), []).append(a["name"])
+    def row(name, depth):
+        a = by_name[name]
         e = STATUS_EMOJI.get(a.get("status", "idle"), "·")
         model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:10]
         last_iter = f"#{a.get('last_iter', 0)}"
@@ -70,12 +77,20 @@ def render(state: dict) -> str:
         ts = a.get("last_iter_ts")
         rel = ""
         if ts:
-            dt = datetime.fromisoformat(ts)
-            secs = int((datetime.now(timezone.utc) - dt).total_seconds())
-            if secs < 60: rel = f"{secs}s ago"
-            elif secs < 3600: rel = f"{secs // 60}m ago"
-            else: rel = f"{secs // 3600}h ago"
-        lines.append(f"{e} {a['name']:<12} {a.get('status','idle'):<8} {model_short:<10} {last_iter:<7} {ctx:>4}% {rel:<16}")
+            try:
+                dt = datetime.fromisoformat(ts)
+                secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+                if secs < 60: rel = f"{secs}s"
+                elif secs < 3600: rel = f"{secs // 60}m"
+                else: rel = f"{secs // 3600}h"
+            except Exception: pass
+        prefix = ("  " * depth) + ("└ " if depth > 0 else "")
+        label = (prefix + a["name"])[:18]
+        lines.append(f"{e} {label:<16} {a.get('status','idle'):<8} {model_short:<10} {last_iter:<7} {ctx:>4}% {rel:<10}")
+        for c in children.get(name, []):
+            row(c, depth + 1)
+    for root in children.get(None, []):
+        row(root, 0)
     lines.append("```")
     lines.append(f"_updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}_")
     return "\n".join(lines)

@@ -92,6 +92,52 @@ To leave the human a non-blocking note (no reply expected), use:
 $C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "message"
 ```
 
+## Sub-agents (spawn/kill)
+
+You can spawn a dedicated sub-agent for a bounded sub-task using:
+
+```
+$C3R_BIN/c3r spawn <name> <role> "<one-sentence focus>" [--model sonnet|opus|haiku]
+```
+
+The spawned agent becomes your child (parent link auto-filled from your env).
+It runs in its own worktree, gets its own Discord thread, and joins the tmux
+session immediately. You can spawn children recursively (they can spawn too).
+
+**When to spawn:**
+- A task you were assigned decomposes cleanly into an independent sub-task
+  that can run on its own without constant coordination.
+- A research question needs deep investigation that would blow your context
+  window if done in-iteration (e.g. "read and summarize these 5 papers").
+- A reviewer / critic role would help (e.g. spawn a `critic` child to
+  review your own output from a different angle).
+
+**When NOT to spawn:**
+- The task is tightly coupled to your own ongoing work (just do it yourself).
+- You're already near the `max_agents` cap — children fail fast with a clear
+  error if the cap is hit. Check the cap first:
+      `$C3R_BIN/c3r status | head -5`  (shows `agents: N/cap`)
+- The sub-task would finish in less than one of your own iterations (overhead
+  of spawning > benefit).
+
+**When to kill a child:**
+- Its task is done and further iterations would be wasted quota.
+- You detect it's stuck or drifting off-task.
+- You need the agent slot back to spawn a different sub-agent.
+
+Kill with:
+```
+$C3R_BIN/c3r kill <child-name>
+```
+
+This is non-destructive: the child's worktree, branch, git history, and
+Discord thread history all survive. Killing cascades — if you kill a child
+that has its own grandchildren, all are stopped. You may only kill agents
+in your own subtree (yourself or any descendant).
+
+Before spawning, send a brief `notify.py` message to your OWN thread
+explaining what you're spawning and why — this gives the human visibility.
+
 ## Each iteration, in order
 
 1. `git fetch && git log --all --oneline -20`
