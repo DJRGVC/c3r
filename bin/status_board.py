@@ -120,18 +120,32 @@ def fetch_usage_data() -> dict | None:
     except Exception:
         return None
 
-def _bar10(pct: float) -> str:
-    """10-cell unicode progress bar for embed fields.
+def _colored_bar(pct: float, n_cells: int = 10) -> str:
+    """ANSI-colored progress bar.
 
-    Uses █ (full block) and ▒ (medium shade) — both are block-element
-    characters that fill their cell uniformly in Discord's monospace
-    font, so the bar's visual height stays consistent across filled and
-    unfilled cells. (The previous ░ light-shade rendered as sparse dots
-    that looked visibly shorter than the full blocks.)"""
+    Uses ▬ (BLACK RECTANGLE) for ALL cells — it's a middle-of-cell
+    horizontal bar with natural whitespace above and below, so successive
+    bar lines don't visually touch each other. The fill state is conveyed
+    by COLOR, not character: filled cells get green/yellow/red based on
+    bracket, empty cells get dim grey. Same glyph everywhere = uniform
+    visual height across all cells, no rendering artifacts."""
+    if pct is None:
+        return f"{ANSI_DIM}{'─' * n_cells}{ANSI_RESET}"
+    pct = max(0.0, min(100.0, float(pct)))
+    filled = int(round(pct * n_cells / 100))
+    if pct >= 80:   c = ANSI_RED
+    elif pct >= 50: c = ANSI_YELLO
+    elif pct > 0:   c = ANSI_GREEN
+    else:           c = ANSI_DIM
+    return f"{c}{'▬' * filled}{ANSI_DIM}{'▬' * (n_cells - filled)}{ANSI_RESET}"
+
+def _bar10(pct: float) -> str:
+    """Backwards-compat shim — returns plain text bar (used in non-ANSI
+    rendering paths if any). Real rendering uses _colored_bar."""
     if pct is None: return "──────────"
     filled = int(round(pct / 10))
     filled = max(0, min(10, filled))
-    return "█" * filled + "▒" * (10 - filled)
+    return "▬" * filled + "▬" * (10 - filled)
 
 def _resets_in(ts_str: str | None) -> str:
     if not ts_str: return ""
@@ -212,13 +226,10 @@ def render_embed(state: dict) -> dict:
             if not w: return
             p = w.get("utilization")
             if p is None: return
-            bar = _bar10(p)
-            if p >= 80:   c = ANSI_RED
-            elif p >= 50: c = ANSI_YELLO
-            else:         c = ANSI_GREEN
+            bar = _colored_bar(p, 10)
             rel = _resets_in(w.get("resets_at"))
             rel_str = f" {ANSI_DIM}resets {rel}{ANSI_RESET}" if rel else ""
-            block_lines.append(f"  {label:<{NAME_W}} {c}{bar}{ANSI_RESET}  {p:>3.0f}%{rel_str}")
+            block_lines.append(f"  {label:<{NAME_W}} {bar}  {p:>3.0f}%{rel_str}")
         usage_row("5h window",   usage.get("five_hour"))
         usage_row("7d window",   usage.get("seven_day"))
         usage_row("7d · sonnet", usage.get("seven_day_sonnet"))
@@ -240,18 +251,14 @@ def render_embed(state: dict) -> dict:
         model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:MODEL_W]
         iter_n = f"#{a.get('last_iter', 0)}"
         ctx = a.get("last_context_pct", 0)
-        bar = _bar10(ctx)
-        if ctx >= 75:   bar_c = ANSI_RED
-        elif ctx >= 50: bar_c = ANSI_YELLO
-        elif ctx > 0:   bar_c = ANSI_GREEN
-        else:           bar_c = ANSI_DIM
+        bar = _colored_bar(ctx, 10)
         prefix = "  " * depth + ("└ " if depth > 0 else "")
         label = (prefix + a["name"])[:NAME_W - 2]
         block_lines.append(
             f"  {glyph} {label:<{NAME_W - 2}} "
             f"{model_short:<{MODEL_W}} "
             f"{iter_n:<{ITER_W}} "
-            f"{bar_c}{bar}{ANSI_RESET}  "
+            f"{bar}  "
             f"{ctx:>3}%"
         )
         # Indented 8 spaces so badges visibly nest under the agent name.
