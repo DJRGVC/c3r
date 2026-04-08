@@ -578,6 +578,9 @@ AGENT_MODEL="$model"
 ITERATION_COOLDOWN_SEC=20
 MAX_CONSECUTIVE_FAILURES=5
 CONTEXT_ALERT_THRESHOLDS="25 50 75 100"
+# Per-iteration wall-clock cap in seconds. Empty = no timeout (default).
+# Leave empty for projects with long training runs.
+ITERATION_TIMEOUT_SEC=""
 C3R_AGENT_THREAD_ID="$thread"
 EOF
 }

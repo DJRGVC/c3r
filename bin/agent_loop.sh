@@ -85,7 +85,14 @@ while :; do
     # --dangerously-skip-permissions is REQUIRED for autonomous loops: without
     # it, `claude -p` runs in restricted mode and refuses Edit/Write/Bash, so
     # the agent would read files, reason, and exit without doing any work.
-    if claude -p --output-format json --model "$AGENT_MODEL" \
+    # Optional wall-clock cap. Empty ITERATION_TIMEOUT_SEC = no timeout
+    # (default, correct for long training runs). Set in agent.conf if you
+    # want a safety net for a project with predictable iter lengths.
+    _iter_prefix=()
+    if [ -n "$ITERATION_TIMEOUT_SEC" ]; then
+        _iter_prefix=(timeout "$ITERATION_TIMEOUT_SEC")
+    fi
+    if "${_iter_prefix[@]}" claude -p --output-format json --model "$AGENT_MODEL" \
             --dangerously-skip-permissions < "$PROMPT" > "$tmp_out" 2>&1; then
         # parse usage (best effort; missing keys → 0)
         usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
