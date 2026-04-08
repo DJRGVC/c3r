@@ -961,6 +961,23 @@ EOF
     local do_smoke; do_smoke=$(ask "Run Discord smoke test? [Y/n]: " "Y")
     [[ ! "$do_smoke" =~ ^[Nn] ]] && wizard_smoke
 
+    # ---- Quarto report site (optional) ----
+    echo
+    info "Quarto report site (optional)"
+    cat <<'EOF'
+  c3r can scaffold a Quarto website inside your repo that agents
+  auto-maintain. It deploys to GitHub Pages so collaborators can
+  follow your research at https://<you>.github.io/<repo>/.
+  Auto-publishes every 60 minutes from the listener; agents are
+  encouraged to update their own pages every ~10 iterations.
+  Requires the Quarto CLI for local previews:
+    https://quarto.org/docs/get-started/
+EOF
+    local enable_quarto; enable_quarto=$(ask "Enable Quarto report site? [Y/n]: " "Y")
+    if [[ ! "$enable_quarto" =~ ^[Nn] ]]; then
+        cmd_report_init "$target" || warn "Quarto init failed; continuing without it"
+    fi
+
     # ---- Live usage auto-detection (Firefox cookies) ----
     echo
     info "Live Claude usage tracking (claude.ai/settings/usage data in c3r watch)"
@@ -2219,13 +2236,16 @@ cmd_report_build() {
 }
 
 cmd_report_publish() {
+    load_config
     local target; target="$(resolve_target "${1:-}")"
     [ -f "$target/_quarto.yml" ] || die "no _quarto.yml in $target — run 'c3r report init' first"
     command -v quarto >/dev/null || die "quarto CLI not found"
 
+    local channel_id=""
+    local site_url=""
+
     # If this is a c3r project, gather agents/<name>.qmd from each agent
-    # branch into a temp working dir before publishing. Otherwise just
-    # publish whatever's on the current branch.
+    # branch into the working tree before publishing.
     if [ -f "$target/.c3r/state.json" ]; then
         info "gathering agent pages from each agent branch..."
         python3 - "$target/.c3r/state.json" "$target" <<'PY'
@@ -2238,21 +2258,54 @@ for a in state.get("agents", []):
     if a.get("status") == "stopped": continue
     name = a["name"]
     branch = f"agent/{name}"
-    src = f"agents/{name}.qmd"
-    out = agents_dir / f"{name}.qmd"
-    # git show <branch>:<file> — falls back to existing local file if missing
-    r = subprocess.run(["git", "-C", target, "show", f"{branch}:{src}"],
-                       capture_output=True, text=True)
-    if r.returncode == 0:
-        out.write_text(r.stdout)
-        print(f"  pulled {src} from {branch}", file=sys.stderr)
-    else:
-        print(f"  no {src} on {branch} (skipping)", file=sys.stderr)
+    for path in (f"agents/{name}.qmd",):
+        out = pathlib.Path(target) / path
+        out.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["git", "-C", target, "show", f"{branch}:{path}"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            out.write_text(r.stdout)
+            print(f"  pulled {path} from {branch}", file=sys.stderr)
+    # Also pull any per-agent images/videos that the agent committed
+    for sub in ("images", "videos"):
+        r = subprocess.run(["git", "-C", target, "ls-tree", "-r", "--name-only",
+                            branch, f"{sub}/{name}/"], capture_output=True, text=True)
+        if r.returncode == 0:
+            for f in r.stdout.strip().split("\n"):
+                if not f: continue
+                out = pathlib.Path(target) / f
+                out.parent.mkdir(parents=True, exist_ok=True)
+                rr = subprocess.run(["git", "-C", target, "show", f"{branch}:{f}"],
+                                    capture_output=True)
+                if rr.returncode == 0:
+                    out.write_bytes(rr.stdout)
 PY
+        # Read site URL + Discord channel for completion notification
+        site_url=$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json')).get('quarto_site_url',''))" 2>/dev/null || true)
+        channel_id=$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json')).get('channel_id',''))" 2>/dev/null || true)
     fi
 
     info "publishing to GitHub Pages..."
-    cd "$target" && exec quarto publish gh-pages --no-prompt
+    if (cd "$target" && quarto publish gh-pages --no-prompt 2>&1); then
+        ok "publish complete"
+        # Post a completion notification to the project's Discord channel
+        if [ -n "$channel_id" ] && [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+            local msg
+            if [ -n "$site_url" ]; then
+                msg="✅ Quarto site rebuilt — $site_url"
+            else
+                msg="✅ Quarto site rebuilt"
+            fi
+            DISCORD_CHANNEL_ID="$channel_id" "$C3R_BIN/notify.py" "$msg" >/dev/null 2>&1 || true
+        fi
+    else
+        warn "publish failed"
+        if [ -n "$channel_id" ] && [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+            DISCORD_CHANNEL_ID="$channel_id" "$C3R_BIN/notify.py" \
+                "⚠ Quarto rebuild failed — see local logs" >/dev/null 2>&1 || true
+        fi
+        return 1
+    fi
 }
 
 cmd_report_status() {

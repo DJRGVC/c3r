@@ -180,6 +180,30 @@ while :; do
     if [ "$iter_ok" = 1 ]; then
         hb --status idle --inc-iter
         fail_streak=0
+
+        # Quarto cadence nudge: if a Quarto site exists and the agent
+        # hasn't touched their .qmd page in the last 10 commits, inject
+        # a soft reminder into INBOX. Idempotent — won't double-add.
+        QUARTO_ROOT="$(dirname "$(dirname "$C3R_STATE")")"
+        QUARTO_PAGE="agents/$C3R_AGENT_NAME.qmd"
+        if [ -f "$QUARTO_ROOT/_quarto.yml" ] \
+           && ! grep -q "QUARTO_UPDATE_NUDGE" "$C3R_WORKTREE/.c3r/INBOX.md" 2>/dev/null \
+           && ! git -C "$C3R_WORKTREE" log -10 --name-only --format= 2>/dev/null \
+                | grep -q "^${QUARTO_PAGE}$"; then
+            python3 - "$C3R_WORKTREE/.c3r/INBOX.md" "$C3R_AGENT_NAME" "$QUARTO_PAGE" <<'PY'
+import sys, pathlib
+from datetime import datetime, timezone
+inbox_path, agent, page = sys.argv[1:]
+inbox = pathlib.Path(inbox_path)
+inbox.parent.mkdir(parents=True, exist_ok=True)
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
+    inbox.write_text("# INBOX\n")
+with inbox.open("a") as f:
+    f.write(f"\n---\n[{ts}] system → {agent}\nMSG: 📝 QUARTO_UPDATE_NUDGE — you haven't touched {page} in your last 10 commits. If you've done anything reportable (a result, a decision, a milestone, a figure), append a new section to that file before your next experiment. The Quarto site is the public face of your research; keep it fresh. If genuinely nothing notable has happened, ignore this nudge — it'll re-fire after another 10 silent commits. Format reminder: see PROMPT.md 'Quarto report' section.\n")
+print(f"[agent_loop] injected QUARTO_UPDATE_NUDGE into {inbox_path}", file=sys.stderr)
+PY
+        fi
     else
         echo "[agent_loop] claude call failed on iter $iter_id" >&2
         tail -20 "$tmp_out" >&2 || true

@@ -27,6 +27,7 @@ POLL_INTERVAL = 4.0
 VERBOSE = os.environ.get("C3R_LISTEN_VERBOSE", "0") == "1"
 C3R_BIN = Path(os.path.realpath(__file__)).parent
 C3R_DIR = C3R_BIN.parent
+C3R_BINARY = C3R_DIR / "c3r"
 
 def req(method, path, body=None):
     token = os.environ["DISCORD_BOT_TOKEN"]
@@ -81,6 +82,7 @@ HELP_TEXT = """**c3r Discord commands** (main channel)
 !c3r pause               Pause all agents (finishes current iter first)
 !c3r resume              Resume all agents
 !c3r ping <agent> <msg>  Message a specific agent (same as replying in thread)
+!c3r report              Rebuild the Quarto site + post live URL (if enabled)
 ```
 To talk to an agent, just reply inside its thread — no command needed."""
 
@@ -115,6 +117,22 @@ def handle_channel_cmd(state, state_path, content, channel):
             subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "update", "--state", state_path], check=False, timeout=10)
         except Exception as e:
             print(f"[listen] board update after resume failed: {e}", file=sys.stderr)
+    elif cmd == "report":
+        # Manual Quarto site rebuild. Runs c3r report publish in background.
+        if not state.get("quarto_enabled") and not Path(state.get("project_root", os.path.dirname(os.path.dirname(state_path)))).joinpath("_quarto.yml").exists():
+            post(channel, "⚠ Quarto report not enabled for this project. Run `c3r report init <path>` first.")
+        else:
+            project_root = os.path.dirname(os.path.dirname(state_path))
+            site_url = state.get("quarto_site_url", "")
+            post(channel, f"🔄 Rebuilding Quarto site...{' (' + site_url + ')' if site_url else ''}")
+            try:
+                # Background — don't block the listener loop while quarto renders
+                subprocess.Popen(
+                    [str(C3R_BINARY), "report", "publish", project_root],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                post(channel, f"⚠ Failed to spawn rebuild: {e}")
     elif cmd == "ping":
         if len(parts) < 3:
             post(channel, "usage: `!c3r ping <agent> <message>`"); return
@@ -211,6 +229,12 @@ def main() -> int:
     # board would otherwise show very stale "LAST" timestamps.
     BOARD_REFRESH_SEC = 60
     last_board_update = 0.0
+
+    # Auto-publish the Quarto report every QUARTO_PUBLISH_INTERVAL_SEC if
+    # quarto_enabled in state.json. The publish is run in the background
+    # so it doesn't block listener polling.
+    QUARTO_PUBLISH_INTERVAL_SEC = 3600  # 60 min default; configurable in state.json
+    last_quarto_publish = 0.0
     while True:
         try:
             state = load_state(state_path)
@@ -266,6 +290,22 @@ def main() -> int:
                     last_board_update = time.time()
                 except Exception as e:
                     print(f"[listen] board refresh failed: {e}", file=sys.stderr)
+
+            # 4. Periodic Quarto report publish (default 60 min)
+            interval = state.get("quarto_publish_interval_min", 60) * 60
+            if (state.get("quarto_enabled")
+                    and time.time() - last_quarto_publish >= interval):
+                project_root = os.path.dirname(os.path.dirname(state_path))
+                if Path(project_root, "_quarto.yml").exists():
+                    print(f"[listen] auto-publishing Quarto site (interval={interval}s)", file=sys.stderr)
+                    try:
+                        subprocess.Popen(
+                            [str(C3R_BINARY), "report", "publish", project_root],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        last_quarto_publish = time.time()
+                    except Exception as e:
+                        print(f"[listen] quarto auto-publish failed: {e}", file=sys.stderr)
         except Exception as e:
             print(f"[listen] loop error: {e}", file=sys.stderr)
         time.sleep(POLL_INTERVAL)
