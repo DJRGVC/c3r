@@ -60,11 +60,26 @@ hb() { "$C3R_BIN/heartbeat.py" --state "$C3R_STATE" --agent "$C3R_AGENT_NAME" "$
 
 hb --status idle
 
+QUOTA_PAUSE_FLAG="$C3R_WORKTREE/.c3r/PAUSED_QUOTA"
+
 while :; do
-    # --- pause check ---
+    # --- pause check (manual or quota-driven) ---
     while [ -f "$PAUSE_FLAG" ]; do
         hb --status paused
         sleep 15
+    done
+    while [ -f "$QUOTA_PAUSE_FLAG" ]; do
+        resume_ts=$(head -1 "$QUOTA_PAUSE_FLAG" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        if [ "$now" -ge "$resume_ts" ] 2>/dev/null; then
+            echo "[agent_loop] quota pause expired; resuming $C3R_AGENT_NAME" >&2
+            "$C3R_BIN/notify.py" --thread "${C3R_AGENT_THREAD_ID:-}" \
+                "▶ Auto-resumed after quota pause." 2>/dev/null || true
+            rm -f "$QUOTA_PAUSE_FLAG"
+            break
+        fi
+        hb --status paused
+        sleep 60
     done
 
     # --- refresh the SIBLINGS.md snapshot so the agent has fresh cross-branch
@@ -78,6 +93,8 @@ while :; do
             "🔴 **$C3R_AGENT_NAME** circuit breaker tripped ($fail_streak failures). Paused. Use \`c3r resume\` after fixing." || true
         touch "$PAUSE_FLAG"
         fail_streak=0
+        # Reset state.json fail_streak too so the dashboard shows 0/5 not 5/5
+        hb --reset-fails
         continue
     fi
 
@@ -116,20 +133,48 @@ while :; do
     [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null && wait "$watchdog_pid" 2>/dev/null || true
 
     if [ "$iter_ok" = 1 ]; then
-        # Context % = input_tokens / 200k. Input tokens represent what was
-        # LOADED into the window (system prompt + read files + tool results).
-        # Output tokens don't count toward in-turn context pressure; they only
-        # matter on the next turn, and each iteration is a fresh turn.
         usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
+        cost_usd=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('total_cost_usd',0))" 2>/dev/null || echo 0)
         pct=$(( usage_in * 100 / CONTEXT_WINDOW ))
         [ "$pct" -gt 100 ] && pct=100
-        hb --status idle --inc-iter --context-pct "$pct"
+        hb --status idle --inc-iter --context-pct "$pct" --cost-usd "$cost_usd" --model "$AGENT_MODEL"
         fail_streak=0
     else
         echo "[agent_loop] claude call failed on iter $iter_id" >&2
         tail -20 "$tmp_out" >&2 || true
-        hb --status error --fail
-        fail_streak=$((fail_streak + 1))
+        # Quota detection: Claude Code returns specific error messages when
+        # the rate limit or weekly cap is hit. If we see one, set the
+        # quota-pause flag with a reset hint and skip incrementing fail_streak
+        # (the failure isn't the agent's fault).
+        if grep -qiE 'rate.?limit|quota.?exceeded|weekly.?(opus|limit)|usage.?limit|try.?again.?in|too.?many.?requests' "$tmp_out" 2>/dev/null; then
+            reset_hint=$(grep -oiE 'reset[s]?\s+(at|in)\s+[^"]{1,50}|try\s+again\s+in\s+[^"]{1,50}|in\s+[0-9]+\s+(hours|minutes|h|m)' "$tmp_out" 2>/dev/null | head -1 || true)
+            echo "[agent_loop] quota error detected — quota-pausing $C3R_AGENT_NAME" >&2
+            echo "[agent_loop] reset hint: ${reset_hint:-(none parsed; will retry hourly)}" >&2
+            # Compute resume timestamp: parse hint or default to now+1h
+            python3 - "$C3R_WORKTREE/.c3r/PAUSED_QUOTA" "$reset_hint" <<'PY'
+import sys, re, time, os
+flag, hint = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else ""
+resume_ts = time.time() + 3600  # default: 1h
+if hint:
+    m = re.search(r'(\d+)\s*(hour|hr|h|minute|min|m)', hint, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith(('h','hr')):
+            resume_ts = time.time() + n * 3600
+        else:
+            resume_ts = time.time() + n * 60
+with open(flag, "w") as f:
+    f.write(f"{resume_ts:.0f}\n{hint}\n")
+PY
+            "$C3R_BIN/notify.py" --mention \
+                "⏸ **$C3R_AGENT_NAME** auto-paused on quota error. Will retry around $(date -d "@$(head -1 "$C3R_WORKTREE/.c3r/PAUSED_QUOTA")" 2>/dev/null || echo 'in ~1h')." || true
+            hb --status paused
+            # Don't increment fail_streak — quota errors aren't the agent's fault
+        else
+            hb --status error --fail
+            fail_streak=$((fail_streak + 1))
+        fi
     fi
 
     rm -f "$tmp_out"

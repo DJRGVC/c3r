@@ -33,6 +33,12 @@ def main() -> int:
     p.add_argument("--inc-iter", action="store_true")
     p.add_argument("--context-pct", type=int)
     p.add_argument("--fail", action="store_true")
+    p.add_argument("--reset-fails", action="store_true",
+                   help="Force fail_streak to 0 (used after circuit breaker trips)")
+    p.add_argument("--cost-usd", type=float, default=None,
+                   help="Add this iteration's cost in USD to the rolling usage file")
+    p.add_argument("--model", default=None,
+                   help="Model name for cost attribution (used with --cost-usd)")
     args = p.parse_args()
 
     state = load(args.state)
@@ -47,11 +53,41 @@ def main() -> int:
         agent["last_iter_ts"] = datetime.now(timezone.utc).isoformat()
     if args.context_pct is not None:
         agent["last_context_pct"] = args.context_pct
-    if args.fail:
+    if args.reset_fails:
+        agent["fail_streak"] = 0
+    elif args.fail:
         agent["fail_streak"] = agent.get("fail_streak", 0) + 1
     elif args.status == "idle":
         agent["fail_streak"] = 0
     save(args.state, state)
+
+    # Cost / usage tracking → ~/.config/c3r/usage.json keyed by ISO week
+    if args.cost_usd is not None and args.cost_usd > 0:
+        from datetime import date
+        usage_path = os.path.expanduser("~/.config/c3r/usage.json")
+        os.makedirs(os.path.dirname(usage_path), exist_ok=True)
+        try:
+            usage = json.load(open(usage_path)) if os.path.exists(usage_path) else {}
+        except Exception:
+            usage = {}
+        iso_year, iso_week, _ = date.today().isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        usage.setdefault(week_key, {})
+        model_key = args.model or "unknown"
+        usage[week_key][model_key] = round(usage[week_key].get(model_key, 0.0) + args.cost_usd, 6)
+        # Also keep a per-day breakdown (last 30 days)
+        usage.setdefault("daily", {})
+        today_key = date.today().isoformat()
+        usage["daily"].setdefault(today_key, {})
+        usage["daily"][today_key][model_key] = round(usage["daily"][today_key].get(model_key, 0.0) + args.cost_usd, 6)
+        # Trim daily to last 30 entries
+        if len(usage["daily"]) > 30:
+            keys = sorted(usage["daily"].keys())
+            for old in keys[:-30]:
+                del usage["daily"][old]
+        tmp = usage_path + ".tmp"
+        with open(tmp, "w") as f: json.dump(usage, f, indent=2)
+        os.replace(tmp, usage_path)
 
     # Redraw the board
     subprocess.run([sys.executable, f"{C3R_BIN}/status_board.py", "update", "--state", args.state], check=False)
