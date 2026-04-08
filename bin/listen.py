@@ -179,7 +179,15 @@ def main() -> int:
     signal.signal(signal.SIGHUP, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
 
-    channel = os.environ["DISCORD_CHANNEL_ID"]
+    # Read channel from state.json — NOT from env. The env var holds only
+    # one channel (whichever project was set up most recently in
+    # ~/.config/c3r/config.env), so multi-project setups would have all
+    # listeners polling the wrong channel if we trusted env.
+    state_initial = load_state(state_path)
+    channel = state_initial.get("channel_id") or os.environ.get("DISCORD_CHANNEL_ID")
+    if not channel:
+        print("[listen] FATAL: no channel_id in state.json or DISCORD_CHANNEL_ID env", file=sys.stderr)
+        return 4
     me = req("GET", "/users/@me")
     if not me:
         print("[listen] FATAL: could not fetch bot identity", file=sys.stderr); return 1
@@ -201,7 +209,6 @@ def main() -> int:
             print(f"[listen] startup cursor: channel @ {last_channel_id}", file=sys.stderr)
     except Exception as e:
         print(f"[listen] could not fetch latest channel msg: {e}", file=sys.stderr)
-    state_initial = load_state(state_path)
     for a in state_initial.get("agents", []):
         tid = a.get("thread_id")
         if not tid: continue
@@ -219,9 +226,8 @@ def main() -> int:
         except Exception as e:
             print(f"[listen] could not save cursors: {e}", file=sys.stderr)
 
-    print(f"[listen] up — bot_id={bot_id} channel={channel}", file=sys.stderr)
-    state0 = load_state(state_path)
-    for a in state0.get("agents", []):
+    print(f"[listen] up — project={state_initial.get('project','?')} bot_id={bot_id} channel={channel}", file=sys.stderr)
+    for a in state_initial.get("agents", []):
         print(f"[listen]   agent {a['name']} → thread {a.get('thread_id')} worktree {a['worktree']}", file=sys.stderr)
 
     # Auto-refresh the pinned status board every BOARD_REFRESH_SEC, even if

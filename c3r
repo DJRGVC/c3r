@@ -1221,8 +1221,11 @@ PY
     # Add a listener window. SECURITY: source config.env so DISCORD_BOT_TOKEN
     # is not visible in `ps -ef`. The export-on-command-line pattern leaks
     # secrets to any local user with shell access.
+    # Override DISCORD_CHANNEL_ID per-project from state.json (config.env
+    # only has one global channel; multi-project needs per-project override).
+    local proj_channel; proj_channel="$(python3 -c "import json;print(json.load(open('$state'))['channel_id'])")"
     tmux new-window -t "$session" -n "listen" \
-        "bash -lc \"set -a; . '$CONFIG_FILE'; set +a; export C3R_STATE='$state' && '$C3R_BIN/listen.py'\""
+        "bash -lc \"set -a; . '$CONFIG_FILE'; set +a; export DISCORD_CHANNEL_ID='$proj_channel' C3R_STATE='$state' && '$C3R_BIN/listen.py'\""
     ok "session '$session' up (including listener window)"
     info "attach: tmux attach -t $session"
 }

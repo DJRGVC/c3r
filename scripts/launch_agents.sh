@@ -13,8 +13,13 @@ STATE="$REPO/.c3r/state.json"
 [ -f "$STATE" ] || { echo "[launch] missing $STATE — run 'c3r init' first" >&2; exit 1; }
 
 : "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN}"
-: "${DISCORD_CHANNEL_ID:?set DISCORD_CHANNEL_ID}"
 : "${DISCORD_USER_ID:?set DISCORD_USER_ID}"
+# Read channel_id from state.json — config.env's DISCORD_CHANNEL_ID only
+# holds ONE channel (whichever project was init'd last), so we always
+# override per-project from state. This prevents multi-project setups
+# from polling the wrong channel.
+PROJECT_CHANNEL_ID="$(python3 -c "import json;print(json.load(open('$STATE'))['channel_id'])")"
+: "${PROJECT_CHANNEL_ID:?could not read channel_id from $STATE}"
 
 C3R_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export C3R_DIR
@@ -67,7 +72,8 @@ for line in "${AGENTS[@]}"; do
     # putting them on the visible-to-`ps` command line.
     env_cmd="cd '$worktree' && \
         set -a; . '$CONFIG_FILE'; set +a; \
-        export C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$STATE' \
+        export DISCORD_CHANNEL_ID='$PROJECT_CHANNEL_ID' \
+        C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$STATE' \
         C3R_AGENT_NAME='$name' C3R_WORKTREE='$worktree' \
         C3R_AGENT_THREAD_ID='$thread' && \
         '$C3R_BIN/agent_loop.sh'"
