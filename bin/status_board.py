@@ -56,6 +56,34 @@ def req(method: str, path: str, body=None):
 
 STATUS_EMOJI = {"idle": "⚪", "running": "🟢", "paused": "⏸", "error": "🔴", "stopped": "⚫"}
 
+# Discord embed color stripe (decimal RGB)
+COLOR_GREEN  = 0x57F287   # all healthy
+COLOR_YELLOW = 0xFEE75C   # warnings (paused, high context, mid-activity)
+COLOR_RED    = 0xED4245   # any agent errored or quota-paused
+COLOR_GREY   = 0x99AAB5   # all stopped or unknown
+
+def _health_color(state: dict) -> int:
+    agents = state.get("agents", [])
+    active = [a for a in agents if a.get("status") != "stopped"]
+    if not active: return COLOR_GREY
+    if state.get("paused"): return COLOR_YELLOW
+    for a in active:
+        if a.get("fail_streak", 0) >= 3: return COLOR_RED
+        if a.get("status") == "error":  return COLOR_RED
+        if a.get("last_context_pct", 0) >= 75: return COLOR_RED
+    for a in active:
+        if a.get("last_context_pct", 0) >= 50: return COLOR_YELLOW
+    return COLOR_GREEN
+
+def _ctx_glyph(pct: int) -> str:
+    """Tiny progress bar for context %."""
+    if pct >= 90: return "█████"
+    if pct >= 75: return "████░"
+    if pct >= 50: return "███░░"
+    if pct >= 25: return "██░░░"
+    if pct >  0:  return "█░░░░"
+    return "░░░░░"
+
 def fetch_usage_summary() -> str:
     """Call claude_usage.py and return a one-liner for the board header.
     Returns empty string if usage data is unavailable (so the board still
@@ -82,49 +110,88 @@ def fetch_usage_summary() -> str:
     except Exception:
         return ""
 
-def render(state: dict) -> str:
+def _rel_time(ts_str: str | None) -> str:
+    if not ts_str: return "—"
+    try:
+        dt = datetime.fromisoformat(ts_str)
+        secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if secs < 60: return f"{secs}s ago"
+        if secs < 3600: return f"{secs // 60}m ago"
+        if secs < 86400: return f"{secs // 3600}h ago"
+        return f"{secs // 86400}d ago"
+    except Exception:
+        return "—"
+
+def render_embed(state: dict) -> dict:
+    """Build a rich Discord embed for the status board."""
     cap = state.get("max_agents", "?")
-    active_n = sum(1 for a in state["agents"] if a.get("status") != "stopped")
-    stopped_n = sum(1 for a in state["agents"] if a.get("status") == "stopped")
-    suffix = f" · {stopped_n} stopped" if stopped_n else ""
-    lines = [f"## c3r · {state['project']}   `{active_n}/{cap} active{suffix}`"]
+    agents = state.get("agents", [])
+    active_n = sum(1 for a in agents if a.get("status") != "stopped")
+    stopped_n = sum(1 for a in agents if a.get("status") == "stopped")
+
+    # ── Description: usage line + headline counts ──
+    desc_lines = []
     usage_line = fetch_usage_summary()
     if usage_line:
-        lines.append(usage_line)
+        desc_lines.append(usage_line)
+    capacity = f"`{active_n}/{cap}` active agents"
+    if stopped_n: capacity += f" · `{stopped_n}` stopped"
+    desc_lines.append(capacity)
     if state.get("paused"):
-        lines.append("**⏸ PAUSED** — agents will finish current iteration then halt.")
-    lines.append("```")
-    lines.append(f"{'AGENT':<18} {'STATUS':<8} {'MODEL':<10} {'ITER':<7} {'CTX%':>5} {'LAST':<10}")
-    by_name = {a["name"]: a for a in state["agents"]}
+        desc_lines.append("⏸ **PAUSED** — agents will halt after their current iteration")
+
+    # ── Build agent tree ──
+    by_name = {a["name"]: a for a in agents}
     children = {}
-    for a in state["agents"]:
+    for a in agents:
         children.setdefault(a.get("parent"), []).append(a["name"])
+
+    table_lines = []
+    table_lines.append(f"{'AGENT':<22}{'STATUS':<10}{'MODEL':<8}{'ITER':<6}{'CTX':<10}{'LAST':<10}")
+    table_lines.append("─" * 66)
+
     def row(name, depth):
         a = by_name[name]
-        e = STATUS_EMOJI.get(a.get("status", "idle"), "·")
-        model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:10]
-        last_iter = f"#{a.get('last_iter', 0)}"
+        st = a.get("status", "idle")
+        e = STATUS_EMOJI.get(st, "·")
+        model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:6]
+        iter_n = f"#{a.get('last_iter', 0)}"
         ctx = a.get("last_context_pct", 0)
-        ts = a.get("last_iter_ts")
-        rel = ""
-        if ts:
-            try:
-                dt = datetime.fromisoformat(ts)
-                secs = int((datetime.now(timezone.utc) - dt).total_seconds())
-                if secs < 60: rel = f"{secs}s"
-                elif secs < 3600: rel = f"{secs // 60}m"
-                else: rel = f"{secs // 3600}h"
-            except Exception: pass
-        prefix = ("  " * depth) + ("└ " if depth > 0 else "")
-        label = (prefix + a["name"])[:18]
-        lines.append(f"{e} {label:<16} {a.get('status','idle'):<8} {model_short:<10} {last_iter:<7} {ctx:>4}% {rel:<10}")
+        ctx_str = f"{_ctx_glyph(ctx)} {ctx:>3}%"
+        rel = _rel_time(a.get("last_iter_ts"))
+        prefix = "  " * depth + ("└ " if depth > 0 else "")
+        label = f"{e} {prefix}{a['name']}"[:22]
+        table_lines.append(f"{label:<22}{st:<10}{model_short:<8}{iter_n:<6}{ctx_str:<10}{rel:<10}")
+        # Health badges below the row when notable
+        badges = []
+        if a.get("fail_streak", 0) >= 3:
+            badges.append(f"⚠ fail_streak={a['fail_streak']}")
+        if ctx >= 75 and st != "stopped":
+            badges.append(f"⚠ context near full")
+        if badges:
+            table_lines.append(f"{' ' * 22}{' · '.join(badges)}")
         for c in children.get(name, []):
             row(c, depth + 1)
+
     for root in children.get(None, []):
         row(root, 0)
-    lines.append("```")
-    lines.append(f"_updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}_")
-    return "\n".join(lines)
+
+    table_block = "```\n" + "\n".join(table_lines) + "\n```"
+
+    embed = {
+        "title": f"c3r · {state['project']}",
+        "color": _health_color(state),
+        "description": "\n".join(desc_lines) + "\n" + table_block,
+        "footer": {
+            "text": f"updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ·  auto-refresh 60s"
+        },
+    }
+    return embed
+
+# Backwards-compatible plain-text renderer (used by `c3r status` console output).
+def render(state: dict) -> str:
+    e = render_embed(state)
+    return f"## {e['title']}\n{e['description']}\n_{e['footer']['text']}_"
 
 def load_state(path: str) -> dict:
     with open(path) as f: return json.load(f)
@@ -155,8 +222,8 @@ def _suppress_pin_notification(channel: str, board_msg_id: str) -> None:
 def cmd_init(args) -> int:
     state = load_state(args.state)
     channel = state["channel_id"]
-    content = render(state)
-    msg = req("POST", f"/channels/{channel}/messages", {"content": content})
+    embed = render_embed(state)
+    msg = req("POST", f"/channels/{channel}/messages", {"embeds": [embed]})
     state["board_message_id"] = msg["id"]
     try:
         req("PUT", f"/channels/{channel}/pins/{msg['id']}")
@@ -185,8 +252,10 @@ def cmd_update(args) -> int:
     if not state.get("board_message_id"):
         print("[board] no board_message_id in state; run init first", file=sys.stderr)
         return 1
+    # PATCH with embeds; clear `content` to avoid leftover plain text from
+    # older boards rendered before the embed migration.
     req("PATCH", f"/channels/{state['channel_id']}/messages/{state['board_message_id']}",
-        {"content": render(state)})
+        {"embeds": [render_embed(state)], "content": ""})
     return 0
 
 def cmd_bump(args) -> int:
