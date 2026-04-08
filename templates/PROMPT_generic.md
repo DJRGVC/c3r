@@ -111,21 +111,55 @@ context window. The files on disk are your only persistent memory.
      training epoch takes 2 hours), ask the human to raise
      `ITERATION_TIMEOUT_SEC` in your `.c3r/agent.conf` via `ask_human.py`.
 
-   **Context window pressure.** Opus 4.6 and Sonnet 4.6 have 1,000,000
-   (1M) tokens each. You have a lot of headroom. However, `RESEARCH_LOG.md`,
-   `SIBLINGS.md`, and `fix_plan.md` grow over time, and every iteration
-   reloads them into the window. If your reported context % climbs past
-   50%, proactively prune:
-     - Move old `RESEARCH_LOG.md` entries (anything >30 iterations back) to
-       `RESEARCH_LOG_ARCHIVE.md` in the same worktree. The archive still
-       counts for git history but is not loaded each iter.
-     - Summarize long PROMPT.md sections that are no longer actionable.
-     - Trim `fix_plan.md` — move completed tasks to a "done" section at
-       the bottom or delete them.
-   Pruning is your responsibility — the harness will not do it for you.
-   At 75% you get an @mention alert; at 100% the iteration may fail
-   outright with a context-overflow error (which counts as a failed iter
-   toward the circuit breaker).
+   **Context window pressure — self-compaction protocol.** Opus 4.6 and
+   Sonnet 4.6 have 1,000,000 (1M) tokens each. You have lots of headroom,
+   but `RESEARCH_LOG.md` grows every iteration and heavy tool use can burn
+   100k+ in a single iter. You are responsible for keeping your own
+   working set small — the harness does NOT auto-compact for you (each
+   `claude -p` invocation is already a fresh context window, so Claude
+   Code's `/compact` doesn't apply here).
+
+   **Compaction trigger — check at the TOP of every iteration**, right
+   after reading INBOX and before any other work:
+
+   ```
+   lines=$(wc -l < .c3r/RESEARCH_LOG.md)
+   [ "$lines" -gt 300 ] && echo "compaction needed"
+   ```
+
+   If RESEARCH_LOG.md > 300 lines, OR your last iteration's reported
+   context % (check `.c3r/state.json` or the last RESEARCH_LOG entry) was
+   > 50%, **this iteration is a DEDICATED COMPACTION iteration**. Do
+   nothing else — your entire iter is compaction:
+
+   1. **Read the full `RESEARCH_LOG.md`.** Group consecutive iterations by
+      theme (e.g. "iters 15-22: entropy coefficient sweep").
+   2. **Write `.c3r/RESEARCH_LOG_ARCHIVE.md`** appending the verbatim old
+      entries (everything older than the last ~20 iterations).
+   3. **Rewrite `.c3r/RESEARCH_LOG.md`** to contain:
+      - A "## Compacted summary (through iter_NNN)" block at the top with
+        2-3 dense paragraphs summarizing what was learned (key findings,
+        dead ends, config deltas, unresolved questions)
+      - The last ~20 verbatim iteration entries (still useful for immediate
+        context)
+   4. **Prune `fix_plan.md`** — delete completed tasks, consolidate
+      duplicates, keep only forward-looking work.
+   5. **Commit** with message `iter_NNN: compaction (summarized iters X-Y)`.
+   6. **Post a short notify to your thread**:
+      `$C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "🗜 compacted iters X-Y into summary; log shrunk from N→M lines"`.
+   7. **Exit the iteration.** Normal work resumes next iteration.
+
+   Compaction is an iteration's entire work — do not try to compact AND
+   run experiments in the same iteration.
+
+   **Do not compact before iter 30** — too little material to summarize
+   usefully. The first ~30 entries should stay verbatim.
+
+   **Never delete `RESEARCH_LOG_ARCHIVE.md`** — it's the permanent record.
+
+   **Context % alerts** still fire at 25/50/75/100% — use them as early
+   warnings. If you see the 50% alert, your NEXT iteration should be
+   compaction.
 
 7. **Reading Weights & Biases.** If the project uses wandb, you can read
    metrics from runs (including currently-running ones) via the Python API:
