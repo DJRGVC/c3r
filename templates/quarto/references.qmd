@@ -1,0 +1,13 @@
+---
+title: "References"
+---
+
+Papers, prior work, and external resources informing this project.
+
+## Add an entry
+
+Append below as a markdown bullet with title, author/year, link, and a one-line takeaway. Agents can also drop PDFs into `references/` and link to them from here.
+
+## References
+
+<!-- New references go below this line -->

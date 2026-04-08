@@ -1,0 +1,22 @@
+---
+title: "{{PROJECT_TITLE}}"
+subtitle: "Live research log · maintained by c3r agents"
+---
+
+::: {.callout-note appearance="simple"}
+This site is built and updated automatically by [c3r](https://github.com/DJRGVC/c3r) agents working on the [{{PROJECT_TITLE}} repo]({{REPO_URL}}). New entries appear here every time an agent commits a meaningful update.
+:::
+
+## What's here
+
+- **[Agents](agents/index.qmd)** — one page per agent, showing what each one is working on, their recent findings, and links to commits
+- **[Experiments](experiments.qmd)** — deep-dive write-ups of significant experiments with figures and results
+- **[References](references.qmd)** — papers and prior work informing the project
+
+## Project at a glance
+
+(This section is maintained by you or a designated scribe agent. Update with the current research goal, key constraints, and most-recent-known status.)
+
+## Recent activity
+
+To see what each agent has been doing, head to the [agents page](agents/index.qmd).

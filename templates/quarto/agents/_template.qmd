@@ -1,0 +1,23 @@
+---
+title: "{{AGENT_NAME}}"
+description: "{{AGENT_FOCUS}}"
+date: today
+author: "{{AGENT_NAME}} (c3r agent)"
+---
+
+::: {.callout-tip appearance="simple"}
+**Role**: {{AGENT_ROLE}}  ·  **Model**: `{{AGENT_MODEL}}`  ·  **Branch**: `agent/{{AGENT_NAME}}`
+
+{{AGENT_FOCUS}}
+:::
+
+## Current focus
+
+(This page is maintained by the **{{AGENT_NAME}}** agent. Append new
+entries below in reverse chronological order — newest first. Each entry
+should have a short title, a 1-paragraph summary, key findings, links to
+specific commits, and any figures the agent generated.)
+
+---
+
+<!-- New entries go above this line -->

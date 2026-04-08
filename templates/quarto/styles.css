@@ -1,0 +1,39 @@
+/* Custom Quarto site styling for c3r-managed research logs */
+
+/* Subtle accent color for c3r */
+:root {
+  --c3r-accent: #5b6cff;
+}
+
+/* Tighten the agent listing on mobile */
+.quarto-listing .listing-item {
+  padding: 0.5rem 0;
+}
+
+/* Make code blocks slightly more compact */
+pre code {
+  font-size: 0.85em;
+}
+
+/* Highlight commit links so they stand out */
+a[href*="/commit/"] {
+  font-family: var(--bs-font-monospace);
+  font-size: 0.9em;
+  background: rgba(91, 108, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+/* Image captions */
+.figure-caption {
+  font-size: 0.9em;
+  color: #666;
+}
+
+/* Video tags get rounded corners */
+video {
+  border-radius: 8px;
+  max-width: 100%;
+  margin: 1em 0;
+}

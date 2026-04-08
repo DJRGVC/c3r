@@ -136,6 +136,9 @@ ${BOLD}MAINTENANCE${RESET}
                           git pull, stop, re-render PROMPT.md from new
                           template, append missing agent.conf fields,
                           seed sandbox hook, relaunch (one-shot)
+  report [path] init|serve|build|publish|status
+                          Quarto report site for the project (auto-deploys
+                          to gh-pages; agents maintain agents/<name>.qmd)
   uninstall               remove ~/.local/bin symlink (keeps config)
   help [command]          this message, or detailed help
 
@@ -620,6 +623,19 @@ cmd_doctor() {
     for v in DISCORD_BOT_TOKEN DISCORD_CHANNEL_ID DISCORD_USER_ID; do
         if [ -n "${!v:-}" ]; then ok "$v set"; else warn "$v not set"; fails=$((fails+1)); fi
     done
+    # Quarto check (only warn if a report site exists in the target)
+    local target_arg="${1:-}"
+    if [ -n "$target_arg" ]; then
+        local _t; _t="$(resolve_target "$target_arg")"
+        if [ -f "$_t/_quarto.yml" ]; then
+            if command -v quarto >/dev/null; then
+                ok "quarto → $(command -v quarto) ($(quarto --version 2>&1 | head -1))"
+            else
+                warn "_quarto.yml exists in target but quarto CLI is missing — install from https://quarto.org/docs/get-started/"
+                fails=$((fails+1))
+            fi
+        fi
+    fi
     info "tools"
     for tool in tmux flock python3 git setsid jq; do
         if command -v "$tool" >/dev/null; then ok "$tool → $(command -v "$tool")"
@@ -1931,6 +1947,275 @@ cmd_update() {
     git -C "$C3R_DIR" pull --ff-only
 }
 
+# ------------------------------------------------------------------
+# Quarto report system
+# ------------------------------------------------------------------
+
+cmd_report() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        init)    cmd_report_init    "$@" ;;
+        serve)   cmd_report_serve   "$@" ;;
+        build)   cmd_report_build   "$@" ;;
+        publish) cmd_report_publish "$@" ;;
+        status)  cmd_report_status  "$@" ;;
+        ""|help)
+            cat <<'EOF'
+c3r report — agent-maintained Quarto site for the project
+
+Subcommands:
+  init [path]         scaffold _quarto.yml + agents/ + index.qmd in the target repo
+                      and add a GitHub Actions workflow that auto-deploys to gh-pages
+  serve [path]        run `quarto preview` locally for live editing (auto-reload)
+  build [path]        run `quarto render` to build _site/ without publishing
+  publish [path]      run `quarto publish gh-pages` to push to GitHub Pages
+                      (gathers per-agent reports from each agent branch first)
+  status [path]       show whether the report system is set up + last build info
+
+Quarto must be installed: https://quarto.org/docs/get-started/
+On Linux: download the .deb from quarto.org and `sudo dpkg -i quarto-*.deb`
+On macOS: `brew install --cask quarto`
+
+Setup workflow:
+  1. c3r report init                      (in your project repo)
+  2. Edit index.qmd with your project's headline + status
+  3. c3r report serve                     (preview at localhost:4848)
+  4. Commit + push to your default branch
+  5. The GitHub Action auto-deploys to gh-pages
+  6. Site appears at https://<user>.github.io/<repo>/
+
+Once the structure is in place, agents will automatically maintain
+their own pages (one per agent in agents/<name>.qmd) on their own
+branches as part of their normal iteration commits. `c3r report
+publish` (or the GH Action on push) gathers everything and rebuilds.
+EOF
+            ;;
+        *) die "unknown report subcommand: $sub  (try: c3r report help)" ;;
+    esac
+}
+
+# Helper: substitute {{PLACEHOLDERS}} in a template file using the given vars
+_render_template() {
+    local src="$1" dst="$2"; shift 2
+    local content; content="$(cat "$src")"
+    while [ $# -ge 2 ]; do
+        local key="$1" val="$2"; shift 2
+        content="${content//\{\{$key\}\}/$val}"
+    done
+    printf '%s\n' "$content" > "$dst"
+}
+
+cmd_report_init() {
+    local target; target="$(resolve_target "${1:-}")"
+    [ -d "$target" ] || die "target not found: $target"
+    info "scaffolding Quarto site in $target"
+
+    # Verify target is a git repo (we don't strictly need state.json — Quarto
+    # is useful even outside a c3r-managed project)
+    git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || die "$target is not a git repository"
+
+    # Detect remote URL for the navbar GitHub link (best effort)
+    local repo_url
+    repo_url="$(git -C "$target" config --get remote.origin.url 2>/dev/null \
+        | sed -E 's|git@github\.com:|https://github.com/|; s|\.git$||')"
+    repo_url="${repo_url:-https://github.com/}"
+
+    local project_title
+    if [ -f "$target/.c3r/state.json" ]; then
+        project_title="$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json'))['project'])")"
+    else
+        project_title="$(basename "$target")"
+    fi
+
+    local QUARTO_TPL="$C3R_DIR/templates/quarto"
+
+    # Refuse to clobber an existing _quarto.yml
+    if [ -f "$target/_quarto.yml" ]; then
+        warn "$target/_quarto.yml already exists; refusing to overwrite"
+        info "  to refresh templates manually: cp $QUARTO_TPL/_quarto.yml $target/_quarto.yml"
+        return 1
+    fi
+
+    # Top-level files
+    _render_template "$QUARTO_TPL/_quarto.yml"  "$target/_quarto.yml" \
+        PROJECT_TITLE "$project_title" \
+        REPO_URL "$repo_url"
+    _render_template "$QUARTO_TPL/index.qmd"    "$target/index.qmd" \
+        PROJECT_TITLE "$project_title" \
+        REPO_URL "$repo_url"
+    cp "$QUARTO_TPL/experiments.qmd"            "$target/experiments.qmd"
+    cp "$QUARTO_TPL/references.qmd"             "$target/references.qmd"
+    cp "$QUARTO_TPL/styles.css"                 "$target/styles.css"
+
+    # Subdirectories
+    mkdir -p "$target/agents" "$target/images" "$target/videos" "$target/experiments"
+    cp "$QUARTO_TPL/agents/index.qmd"           "$target/agents/index.qmd"
+    touch "$target/images/.gitkeep" "$target/videos/.gitkeep" "$target/experiments/.gitkeep"
+
+    # Per-agent pages, one per active agent
+    if [ -f "$target/.c3r/state.json" ]; then
+        info "seeding per-agent pages from state.json"
+        python3 - "$target/.c3r/state.json" "$target" "$QUARTO_TPL/agents/_template.qmd" <<'PY'
+import json, sys, pathlib
+state_path, target, tpl_path = sys.argv[1:]
+state = json.load(open(state_path))
+tpl = pathlib.Path(tpl_path).read_text()
+created = 0
+for a in state.get("agents", []):
+    if a.get("status") == "stopped": continue
+    out = pathlib.Path(target) / "agents" / f"{a['name']}.qmd"
+    if out.exists(): continue
+    page = (tpl
+        .replace("{{AGENT_NAME}}", a["name"])
+        .replace("{{AGENT_ROLE}}", a.get("role", "?"))
+        .replace("{{AGENT_MODEL}}", a.get("model", "?"))
+        .replace("{{AGENT_FOCUS}}", a.get("focus", "(no focus set)")))
+    out.write_text(page)
+    created += 1
+    print(f"  created agents/{a['name']}.qmd", file=sys.stderr)
+print(f"  seeded {created} agent page(s)", file=sys.stderr)
+PY
+    fi
+
+    # GitHub Actions workflow for auto-deploy
+    mkdir -p "$target/.github/workflows"
+    if [ -f "$target/.github/workflows/quarto-publish.yml" ]; then
+        warn "  .github/workflows/quarto-publish.yml exists; leaving in place"
+    else
+        cp "$QUARTO_TPL/.github/workflows/quarto-publish.yml" \
+           "$target/.github/workflows/quarto-publish.yml"
+        ok "wrote .github/workflows/quarto-publish.yml"
+    fi
+
+    # .gitignore additions
+    if [ -f "$target/.gitignore" ]; then
+        if ! grep -q "^_site/" "$target/.gitignore"; then
+            {
+                echo ""
+                echo "# Quarto build output"
+                echo "_site/"
+                echo ".quarto/"
+            } >> "$target/.gitignore"
+            ok "appended Quarto entries to .gitignore"
+        fi
+    else
+        cat > "$target/.gitignore" <<'EOF'
+# Quarto build output
+_site/
+.quarto/
+EOF
+        ok "created .gitignore with Quarto entries"
+    fi
+
+    cat <<EOF
+
+${GREEN}${BOLD}Quarto site scaffolded.${RESET}
+
+${BOLD}Next steps:${RESET}
+  1. ${DIM}# Install Quarto CLI if you haven't already${RESET}
+     https://quarto.org/docs/get-started/
+
+  2. ${DIM}# Edit index.qmd to add your project headline${RESET}
+     \$EDITOR $target/index.qmd
+
+  3. ${DIM}# Preview locally (auto-reloads as you edit)${RESET}
+     c3r report serve $target
+
+  4. ${DIM}# Commit + push${RESET}
+     cd $target && git add _quarto.yml index.qmd agents/ experiments/ references.qmd styles.css .github/ .gitignore
+     git commit -m "Add Quarto report site"
+     git push
+
+  5. ${DIM}# Enable GitHub Pages in repo settings → Pages → source = gh-pages branch${RESET}
+     The first push to main triggers the GitHub Action which auto-deploys.
+     Site will appear at: https://<your-user>.github.io/$(basename "$target")/
+
+Agents will automatically maintain agents/<name>.qmd files as part of
+their normal iteration commits once the next \`c3r upgrade\` runs.
+EOF
+}
+
+cmd_report_serve() {
+    local target; target="$(resolve_target "${1:-}")"
+    [ -f "$target/_quarto.yml" ] || die "no _quarto.yml in $target — run 'c3r report init' first"
+    command -v quarto >/dev/null || die "quarto CLI not found — install from https://quarto.org/docs/get-started/"
+    info "starting Quarto preview at http://localhost:4848"
+    info "(auto-reloads as you edit; Ctrl-C to stop)"
+    cd "$target" && exec quarto preview
+}
+
+cmd_report_build() {
+    local target; target="$(resolve_target "${1:-}")"
+    [ -f "$target/_quarto.yml" ] || die "no _quarto.yml in $target — run 'c3r report init' first"
+    command -v quarto >/dev/null || die "quarto CLI not found"
+    info "building static site to $target/_site/"
+    cd "$target" && exec quarto render
+}
+
+cmd_report_publish() {
+    local target; target="$(resolve_target "${1:-}")"
+    [ -f "$target/_quarto.yml" ] || die "no _quarto.yml in $target — run 'c3r report init' first"
+    command -v quarto >/dev/null || die "quarto CLI not found"
+
+    # If this is a c3r project, gather agents/<name>.qmd from each agent
+    # branch into a temp working dir before publishing. Otherwise just
+    # publish whatever's on the current branch.
+    if [ -f "$target/.c3r/state.json" ]; then
+        info "gathering agent pages from each agent branch..."
+        python3 - "$target/.c3r/state.json" "$target" <<'PY'
+import json, os, subprocess, sys, pathlib
+state_path, target = sys.argv[1:]
+state = json.load(open(state_path))
+agents_dir = pathlib.Path(target) / "agents"
+agents_dir.mkdir(parents=True, exist_ok=True)
+for a in state.get("agents", []):
+    if a.get("status") == "stopped": continue
+    name = a["name"]
+    branch = f"agent/{name}"
+    src = f"agents/{name}.qmd"
+    out = agents_dir / f"{name}.qmd"
+    # git show <branch>:<file> — falls back to existing local file if missing
+    r = subprocess.run(["git", "-C", target, "show", f"{branch}:{src}"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        out.write_text(r.stdout)
+        print(f"  pulled {src} from {branch}", file=sys.stderr)
+    else:
+        print(f"  no {src} on {branch} (skipping)", file=sys.stderr)
+PY
+    fi
+
+    info "publishing to GitHub Pages..."
+    cd "$target" && exec quarto publish gh-pages --no-prompt
+}
+
+cmd_report_status() {
+    local target; target="$(resolve_target "${1:-}")"
+    if [ ! -f "$target/_quarto.yml" ]; then
+        warn "no Quarto site in $target  (run: c3r report init)"
+        return 1
+    fi
+    ok "_quarto.yml present"
+    [ -f "$target/index.qmd" ] && ok "index.qmd present"
+    if [ -d "$target/agents" ]; then
+        local n; n=$(find "$target/agents" -name '*.qmd' -not -name 'index.qmd' -not -name '_template.qmd' | wc -l)
+        ok "$n agent page(s) in agents/"
+    fi
+    [ -f "$target/.github/workflows/quarto-publish.yml" ] && ok "GitHub Actions workflow present"
+    if [ -d "$target/_site" ]; then
+        local last; last=$(stat -c '%y' "$target/_site" 2>/dev/null | cut -d. -f1)
+        ok "last local build: $last"
+    else
+        warn "no _site/ directory — site not yet built (run: c3r report build)"
+    fi
+    if command -v quarto >/dev/null; then
+        ok "quarto CLI: $(quarto --version 2>&1 | head -1)"
+    else
+        warn "quarto CLI not installed"
+    fi
+}
+
 cmd_upgrade() {
     load_config
     local target; target="$(resolve_target "${1:-}")"
@@ -1988,6 +2273,33 @@ PY
     else
         info "  2/5: no tmux session running (skipping pause)"
         info "  3/5: nothing to stop"
+    fi
+
+    # If the target has a Quarto site, also seed missing per-agent .qmd
+    # pages from the template. Idempotent — won't overwrite existing pages.
+    if [ -f "$target/_quarto.yml" ]; then
+        info "  3.5/5: refreshing per-agent Quarto pages (existing pages untouched)"
+        python3 - "$state" "$target" "$C3R_DIR/templates/quarto/agents/_template.qmd" <<'PY'
+import json, sys, pathlib
+sp, tgt, tpl_path = sys.argv[1:]
+state = json.load(open(sp))
+tpl = pathlib.Path(tpl_path).read_text()
+adir = pathlib.Path(tgt) / "agents"
+adir.mkdir(parents=True, exist_ok=True)
+created = 0
+for a in state.get("agents", []):
+    if a.get("status") == "stopped": continue
+    out = adir / f"{a['name']}.qmd"
+    if out.exists(): continue
+    page = (tpl
+        .replace("{{AGENT_NAME}}", a["name"])
+        .replace("{{AGENT_ROLE}}", a.get("role", "?"))
+        .replace("{{AGENT_MODEL}}", a.get("model", "?"))
+        .replace("{{AGENT_FOCUS}}", a.get("focus", "(no focus set)")))
+    out.write_text(page)
+    created += 1
+print(f"  created {created} new agent page(s)", file=sys.stderr)
+PY
     fi
 
     info "  4/5: re-rendering PROMPT.md, agent.conf, .claude/settings.json in each worktree"
@@ -2095,6 +2407,7 @@ case "$cmd" in
     reset)     cmd_reset     "$@" ;;
     update)    cmd_update    "$@" ;;
     upgrade)   cmd_upgrade   "$@" ;;
+    report)    cmd_report    "$@" ;;
     version|--version|-v) cmd_version ;;
     uninstall) cmd_uninstall "$@" ;;
     doctor)    cmd_doctor    "$@" ;;

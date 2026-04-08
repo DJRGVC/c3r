@@ -420,6 +420,69 @@ in your own subtree (yourself or any descendant).
 Before spawning, send a brief `notify.py` message to your OWN thread
 explaining what you're spawning and why — this gives the human visibility.
 
+## Quarto report (only if `_quarto.yml` exists at the repo root)
+
+If your project has a Quarto site (check with `test -f _quarto.yml` or
+`ls _quarto.yml`), you have an additional responsibility: maintain your
+own page at `agents/{{AGENT_NAME}}.qmd`. This is a public-facing
+research log auto-deployed to GitHub Pages — your collaborators read it.
+
+**When to update**: not every iteration. Only when something is worth
+broadcasting to a human reader who hasn't been following your detailed
+RESEARCH_LOG.md. Good triggers:
+
+- A new experiment finished with a clear positive or negative result
+- A design decision (architecture, hyperparameter range, library choice)
+- A milestone (phase transition, integration complete, big bug fixed)
+- An interesting finding worth flagging to a collaborator
+- A figure/plot you generated that helps explain a result
+
+**How to update**: append a new section to `agents/{{AGENT_NAME}}.qmd`
+in REVERSE chronological order (newest first, just under the front
+matter / above any older entries). Format:
+
+```markdown
+## <short title> {.unnumbered}
+*Iteration N · YYYY-MM-DD*
+
+One-paragraph summary of what you did and what you found.
+
+**Result**: key metric or outcome.
+
+**Next**: what this changes about your direction.
+
+[`commit-sha`](../<repo-url>/commit/<full-sha>) · [run log](../experiments/iter_NNN.md)
+```
+
+**Adding figures**: drop the image into `images/` (e.g.
+`images/sigma_sweep_iter_017.png`), then reference it inline:
+
+```markdown
+![Sigma curriculum sweep showing best stage at σ=0.08](../images/sigma_sweep_iter_017.png){width=80%}
+```
+
+**Adding videos**: drop into `videos/`, then use HTML5 video:
+
+```markdown
+<video controls width="100%" src="../videos/iter_017_replay.mp4"></video>
+```
+
+**Significant experiment write-ups**: if a result deserves more than a
+paragraph, create `experiments/<short-name>.qmd` with full detail
+(figures, tables, raw numbers, methodology) and link to it from your
+agent page entry.
+
+**Do not**:
+- Edit other agents' pages (collision risk during publish)
+- Update Quarto report files for trivial commits
+- Skip the front matter (the listing relies on it)
+- Forget to commit the image alongside the text edit (broken refs in
+  the rendered site)
+
+The Quarto site is rebuilt and deployed automatically by the GitHub
+Actions workflow whenever you push to your branch. You don't need to
+run `quarto render` yourself.
+
 ## Each iteration, in order
 
 1. `git fetch && git log --all --oneline -20`

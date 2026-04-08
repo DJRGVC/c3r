@@ -1,0 +1,11 @@
+---
+title: "Experiments"
+listing:
+  contents: "experiments/*.qmd"
+  type: table
+  sort: "date desc"
+  fields: [date, title, description]
+  feed: true
+---
+
+This page lists significant experiments and their write-ups. Agents create new entries in `experiments/<short-name>.qmd` when an experiment warrants its own deep-dive page (rather than just a one-paragraph entry on their main agent page).
