@@ -36,10 +36,18 @@ EOF
     ok "saved config → $CONFIG_FILE"
 }
 
-# Resolve target project: explicit arg > $PWD if it has .c3r/state.json > $PWD if it's a git repo
+# Resolve target project path:
+#   1. Explicit arg wins
+#   2. $C3R_STATE env var (set by agent_loop.sh when called from inside an agent)
+#   3. $PWD if it has .c3r/state.json
+#   4. git toplevel of $PWD
 resolve_target() {
     local arg="${1:-}"
-    if [ -n "$arg" ]; then cd "$arg" && git rev-parse --show-toplevel 2>/dev/null || echo "$arg"; return; fi
+    if [ -n "$arg" ]; then cd "$arg" && pwd; return; fi
+    if [ -n "${C3R_STATE:-}" ] && [ -f "$C3R_STATE" ]; then
+        dirname "$(dirname "$C3R_STATE")"
+        return
+    fi
     if [ -f "$PWD/.c3r/state.json" ]; then echo "$PWD"; return; fi
     git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD"
 }
@@ -47,8 +55,14 @@ resolve_target() {
 state_path() { echo "$1/.c3r/state.json"; }
 
 require_state() {
-    local s; s="$(state_path "$1")"
-    [ -f "$s" ] || die "no project state at $s — run 'c3r init' in that repo first"
+    local arg="${1:-}"
+    # Prefer $C3R_STATE when set (agent calling c3r from inside a worktree)
+    if [ -n "${C3R_STATE:-}" ] && [ -f "$C3R_STATE" ]; then
+        echo "$C3R_STATE"
+        return
+    fi
+    local s; s="$(state_path "$arg")"
+    [ -f "$s" ] || die "no project state at $s — run 'c3r init' in that repo first, or set \$C3R_STATE"
     echo "$s"
 }
 
@@ -569,7 +583,7 @@ EOF
 }
 
 cmd_init() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     [ -d "$target/.git" ] || die "not a git repo: $target"
     info "target: $target"
 
@@ -829,7 +843,7 @@ EOF
 
 cmd_launch() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
 
@@ -867,7 +881,7 @@ PY
 }
 
 cmd_watch() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local interval="${2:-1}"
     # Hide cursor, restore on exit
@@ -996,7 +1010,7 @@ PY
 }
 
 cmd_attach() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
     tmux has-session -t "$session" 2>/dev/null || die "session '$session' is not running — use 'c3r launch' first"
@@ -1004,7 +1018,7 @@ cmd_attach() {
 }
 
 cmd_stop() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
     if tmux has-session -t "$session" 2>/dev/null; then
@@ -1016,7 +1030,7 @@ cmd_stop() {
 
 cmd_pause() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     python3 - "$state" <<'PY'
 import json, sys, pathlib
@@ -1033,7 +1047,7 @@ PY
 
 cmd_resume() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     python3 - "$state" <<'PY'
 import json, sys, pathlib
@@ -1051,7 +1065,7 @@ PY
 
 cmd_status() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     python3 - "$state" <<'PY'
 import json, sys, os
@@ -1078,7 +1092,7 @@ PY
 # ------------------------------------------------------------------
 
 cmd_logs() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local agent="${2:-}"
     local files
@@ -1098,7 +1112,7 @@ cmd_ask() {
 
 cmd_ping() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local state; state="$(require_state "$target")"
     local agent="${1:?usage: c3r ping [path] AGENT_NAME MESSAGE}"; shift
@@ -1135,7 +1149,7 @@ PY
 
 cmd_spawn() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local state; state="$(require_state "$target")"
 
@@ -1298,7 +1312,7 @@ cmd_add_agent() { cmd_spawn "$@"; }
 
 cmd_kill() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local state; state="$(require_state "$target")"
     local name="${1:?usage: c3r kill AGENT_NAME}"
@@ -1386,7 +1400,7 @@ PY
 }
 
 cmd_reset() {
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local name="${1:?usage: c3r reset [path] AGENT_NAME}"
     local state; state="$(require_state "$target")"
@@ -1410,7 +1424,7 @@ PY
 
 cmd_board() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local state; state="$(require_state "$target")"
     local sub="${1:?usage: c3r board (bump|update)}"
@@ -1424,7 +1438,7 @@ cmd_update() {
 
 cmd_listen() {
     load_config
-    local target; target="$(cd "${1:-$PWD}" && pwd)"
+    local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     export C3R_STATE="$state"
     exec "$C3R_BIN/listen.py"
