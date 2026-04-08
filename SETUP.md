@@ -63,6 +63,31 @@ In your Discord server:
    (remove its access from every other channel). This is a one-time click in
    the channel's Permissions tab.
 
+### Privacy & credential safety
+
+c3r stores all credentials locally and never transmits them to anywhere
+other than the official endpoints they belong to:
+
+- **Discord bot token** → `~/.config/c3r/config.env` (chmod 600), only sent
+  in headers to `discord.com/api/`
+- **claude.ai cookies** → `~/.config/c3r/config.env` (chmod 600), read live
+  from your local Firefox cookie store, only sent in headers to
+  `claude.ai/api/organizations/<your-uuid>/usage`
+- **Anthropic OAuth token** → not c3r-managed; lives in
+  `~/.claude/.credentials.json` (chmod 600 by Claude Code), used only to hit
+  `api.anthropic.com/api/oauth/account` for plan-tier auto-detection
+
+c3r writes to **two** files only:
+- `~/.config/c3r/config.env` — chmod 600, owner-only
+- `<your-target-repo>/.c3r/state.json` — non-secret, but contains agent
+  metadata; gitignored if you use the bundled `.gitignore`
+
+c3r does **not**:
+- Send any data to the c3r repo or any third-party telemetry endpoint
+- Log credentials to stdout/stderr (errors redact tokens)
+- Commit credentials to git (the bundled `.gitignore` excludes
+  `config.env`, `*credentials*`, `*cookies*`, and `.c3r/state.json`)
+
 ### Grab the IDs
 
 In Discord: **Settings → Advanced → Developer Mode** ON. Then:

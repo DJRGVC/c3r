@@ -570,6 +570,26 @@ cmd_doctor() {
         warn "claude CLI missing"; fails=$((fails+1))
     fi
 
+    info "live claude.ai usage tracking"
+    if "$C3R_BIN/claude_usage.py" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if d.get('source') == 'claude.ai_live':
+        print(f\"OK plan={d.get('plan','?')} cookies={d.get('cookie_source','?')}\")
+        sys.exit(0)
+    print(d.get('error','no live data'))
+    sys.exit(1)
+except Exception as e:
+    print(f'parse error: {e}'); sys.exit(1)
+" > /tmp/c3r_doctor_usage 2>&1; then
+        ok "$(cat /tmp/c3r_doctor_usage)"
+    else
+        warn "live usage unavailable: $(cat /tmp/c3r_doctor_usage)"
+        warn "  fix: visit https://claude.ai/settings/usage in Firefox once, OR run 'c3r usage-auth'"
+    fi
+    rm -f /tmp/c3r_doctor_usage
+
     if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
         info "Discord bot reachability"
         if python3 - <<PY
@@ -819,6 +839,51 @@ EOF
 
     local do_smoke; do_smoke=$(ask "Run Discord smoke test? [Y/n]: " "Y")
     [[ ! "$do_smoke" =~ ^[Nn] ]] && wizard_smoke
+
+    # ---- Live usage auto-detection (Firefox cookies) ----
+    echo
+    info "Live Claude usage tracking (claude.ai/settings/usage data in c3r watch)"
+    cat <<'EOF'
+  c3r can show your real 5h/7d usage % by reading cookies directly from
+  your Firefox cookie store. The browser auto-refreshes them whenever you
+  visit any claude.ai page, so you never have to manually refresh as long
+  as Firefox visits claude.ai daily.
+
+  Privacy: cookies are read in SQLite read-only mode and used only for
+  requests to claude.ai/api/. Nothing is sent to any third party. The
+  config file (~/.config/c3r/config.env) is chmod 600, owner-only.
+EOF
+    if "$C3R_BIN/claude_usage.py" 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if d.get('source') == 'claude.ai_live':
+        fh = (d.get('five_hour') or {}).get('utilization', '?')
+        sd = (d.get('seven_day') or {}).get('utilization', '?')
+        print(f'OK plan={d.get(\"plan\",\"?\")} 5h={fh}% 7d={sd}% via={d.get(\"cookie_source\",\"?\")}')
+        sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+" > /tmp/c3r_usage_smoke 2>&1; then
+        ok "live usage detected: $(cat /tmp/c3r_usage_smoke)"
+    else
+        warn "could not auto-detect live usage from Firefox cookies"
+        cat <<'EOF'
+  This usually means either:
+    a) You don't have Firefox installed (currently c3r only auto-reads
+       Firefox; Chrome cookies are encrypted and harder to access)
+    b) You haven't visited https://claude.ai recently in Firefox
+
+  Visit https://claude.ai/settings/usage in Firefox once, then either:
+    - Re-run `c3r init` to retry auto-detection, or
+    - Run `c3r usage-auth` and paste a curl from devtools manually
+
+  c3r will continue without live usage tracking — the watch dashboard
+  will show plan tier but no usage %.
+EOF
+    fi
+    rm -f /tmp/c3r_usage_smoke
 
     # Worktrees (forked off the dedicated base branch)
     info "creating git worktrees..."
