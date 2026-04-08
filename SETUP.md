@@ -57,6 +57,7 @@ In your Discord server:
      - Send Messages in Threads
      - Read Message History
      - Add Reactions
+     - Manage Threads   (needed so c3r can delete sub-agent threads on kill)
 4. Open the generated URL → invite the bot to your server
 5. In your server's channel settings, **restrict the bot to the c3r channel only**
    (remove its access from every other channel). This is a one-time click in

@@ -1144,9 +1144,12 @@ sp, name, role, model, focus, wt, parent = sys.argv[1:]
 parent = parent or None
 s = json.load(open(sp))
 token = os.environ["DISCORD_BOT_TOKEN"]; channel = s["channel_id"]
-# Create standalone public thread
+# Descriptive thread title: "name · focus" (Discord cap 100 chars)
+# Root agents: "name · focus"; Children: "↳ name · focus" to visually mark subtasks.
+prefix = "↳ " if parent else ""
+title = f"{prefix}{name} · {focus}"[:100]
 req = urllib.request.Request(f"https://discord.com/api/v10/channels/{channel}/threads",
-    data=json.dumps({"name": name, "type": 11, "auto_archive_duration": 10080}).encode(),
+    data=json.dumps({"name": title, "type": 11, "auto_archive_duration": 10080}).encode(),
     method="POST")
 req.add_header("Authorization", f"Bot {token}")
 req.add_header("Content-Type", "application/json")
@@ -1252,21 +1255,45 @@ PY
         if tmux has-session -t "$session" 2>/dev/null; then
             tmux kill-window -t "$session:$agent" 2>/dev/null || true
         fi
-        # Farewell in thread + mark stopped in state.json
+        # Mark stopped + handle thread:
+        #   - sub-agent (has parent): DELETE the thread — ephemeral, keeps channel clean
+        #   - top-level agent: post farewell, keep thread for history
         python3 - "$state" "$agent" <<'PY'
-import json, os, sys, subprocess
+import json, os, sys, subprocess, urllib.error, urllib.request
 sp, name = sys.argv[1:]
 s = json.load(open(sp))
 agent = next((a for a in s["agents"] if a["name"] == name), None)
 if not agent: sys.exit(0)
+is_sub = bool(agent.get("parent"))
 agent["status"] = "stopped"
+thread_id = agent.get("thread_id")
+if thread_id:
+    token = os.environ["DISCORD_BOT_TOKEN"]
+    if is_sub:
+        # Delete the sub-agent's thread entirely
+        req = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{thread_id}",
+            method="DELETE")
+        req.add_header("Authorization", f"Bot {token}")
+        req.add_header("User-Agent", "c3r-kill (0.1)")
+        try:
+            urllib.request.urlopen(req, timeout=15).read()
+            agent["thread_id"] = None
+            print(f"[kill] deleted sub-agent thread for {name}", file=sys.stderr)
+        except urllib.error.HTTPError as e:
+            print(f"[kill] could not delete thread for {name}: HTTP {e.code} {e.read().decode(errors='replace')}", file=sys.stderr)
+            print(f"[kill]   (bot needs 'Manage Threads' permission to delete; falling back to farewell post)", file=sys.stderr)
+            subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/bin/notify.py",
+                            "--thread", thread_id,
+                            "🛑 Sub-agent stopped (thread deletion failed — grant Manage Threads)."],
+                           check=False, cwd=os.path.dirname(os.path.realpath(__file__)))
+    else:
+        # Top-level agent: keep thread, post farewell
+        subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/bin/notify.py",
+                        "--thread", thread_id,
+                        "🛑 Agent stopped. Worktree and history preserved."],
+                       check=False, cwd=os.path.dirname(os.path.realpath(__file__)))
 json.dump(s, open(sp, "w"), indent=2)
-# Farewell post
-if agent.get("thread_id"):
-    subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/bin/notify.py",
-                    "--thread", agent["thread_id"],
-                    "🛑 Agent stopped. Worktree and history preserved."],
-                   check=False, cwd=os.path.dirname(os.path.realpath(__file__)))
 PY
         ok "killed $agent"
     done
