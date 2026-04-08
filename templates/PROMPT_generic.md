@@ -112,13 +112,48 @@ context window. The files on disk are your only persistent memory.
      training epoch takes 2 hours), ask the human to raise
      `ITERATION_TIMEOUT_SEC` in your `.c3r/agent.conf` via `ask_human.py`.
 
-   **Context window pressure — self-compaction protocol.** Opus 4.6 and
-   Sonnet 4.6 have 1,000,000 (1M) tokens each. You have lots of headroom,
-   but `RESEARCH_LOG.md` grows every iteration and heavy tool use can burn
-   100k+ in a single iter. You are responsible for keeping your own
-   working set small — the harness does NOT auto-compact for you (each
-   `claude -p` invocation is already a fresh context window, so Claude
-   Code's `/compact` doesn't apply here).
+   **Context window pressure — what actually causes it.** Opus 4.6 and
+   Sonnet 4.6 have 1,000,000 (1M) tokens each. The static files c3r
+   auto-loads (PROMPT.md, RESEARCH_LOG.md, SIBLINGS.md, fix_plan.md,
+   INBOX.md, plus Claude Code memory) total ~10–20k tokens — barely 2%
+   of the window. **If your context climbs above 50%, it's almost
+   certainly from what YOU loaded during the iteration**, not from the
+   accumulated log.
+
+   **What blows the budget (in order of likelihood):**
+
+   - **Capturing full training/sim stdout** via Bash. A 60-min Isaac sim
+     run produces 10k+ lines of progress, easily 200k+ tokens. ALWAYS
+     pipe through `tail -n 200` or `head -n 50` so only the bookend
+     lines hit the context window. Better: redirect to a log file in
+     `experiments/iter_NNN/`, then `tail` it.
+   - **Reading big source files in full** with the Read tool. A 600-line
+     Python file = ~6k tokens. Reading 10 of them = ~60k tokens. Use
+     `grep -n <pattern> <file>` first to find the relevant lines, THEN
+     Read just that range with `offset` and `limit`.
+   - **Running `find . -name X` or `ls -R` over large dirs**. Output can
+     be 10k+ lines. Use targeted globs: `find source -name '*.py'
+     -path '*/rewards*' -maxdepth 4`.
+   - **`git show <branch>:<file>` on big files**. Same problem as Read.
+     Use `git diff --stat <branch>` first to scope.
+   - **Recursive Read** of a sibling's whole worktree. Don't.
+
+   **Self-compaction protocol** (still valuable but secondary). Even
+   though the log isn't the dominant cost, compacting it periodically
+   keeps things tidy. Trigger: `wc -l .c3r/RESEARCH_LOG.md` > 300, OR
+   your last reported context % was > 50%. Compaction iter:
+   1. Read `.c3r/RESEARCH_LOG.md` in full
+   2. Group by theme, write a 2–3 paragraph summary at the top of
+      a new `RESEARCH_LOG.md`
+   3. Move verbatim old entries to `.c3r/RESEARCH_LOG_ARCHIVE.md`
+   4. Keep the last ~20 verbatim entries in `RESEARCH_LOG.md`
+   5. Prune `fix_plan.md` of completed tasks
+   6. Commit `Iteration N: compaction (summarized iters X–Y)`
+   7. Notify thread: `🗜 compacted iters X–Y; log shrunk N→M lines`
+   8. Exit (no other work this iter)
+
+   Compaction is its own iteration's full work. Don't try to mix it
+   with experiments.
 
    **Compaction trigger — check at the TOP of every iteration**, right
    after reading INBOX and before any other work:
