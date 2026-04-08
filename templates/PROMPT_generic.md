@@ -12,8 +12,13 @@ context window. The files on disk are your only persistent memory.
    thing. If you want to change two, split it into sequential iterations.
 2. **Read state before acting.** At the very start of every iteration, in order:
    - `git fetch && git log --all --oneline -20` — see what sibling agents have done
-   - `cat .c3r/INBOX.md` — read any messages the human left for you since last iter;
-     after reading, move the contents to `.c3r/INBOX_ARCHIVE.md` and clear INBOX.md
+   - `cat .c3r/INBOX.md` — read any messages the human left for you since last iter.
+     After reading, (a) move the contents verbatim to `.c3r/INBOX_ARCHIVE.md`,
+     (b) rewrite `.c3r/INBOX.md` to just `# INBOX\n\n<!-- empty -->\n`, and
+     (c) if there was new content, post a brief acknowledgment in your Discord
+     thread so the human can see you got it:
+         $C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "✓ got your note — <1-line paraphrase of what you'll do about it>"
+     Do this BEFORE starting the main iteration work.
    - Last 5 entries of `.c3r/RESEARCH_LOG.md` — your own history
    - Top of `.c3r/fix_plan.md` — the experiment/task queue
 3. **Append-only log.** Every iteration produces a `RESEARCH_LOG.md` entry, even on
