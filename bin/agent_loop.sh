@@ -161,14 +161,13 @@ d = json.load(open('$tmp_out'))
 u = d.get('usage', {})
 print(u.get('input_tokens',0) + u.get('cache_read_input_tokens',0) + u.get('cache_creation_input_tokens',0))
 " 2>/dev/null || echo 0)
-        cost_usd=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('total_cost_usd',0))" 2>/dev/null || echo 0)
         # Use python for the percentage so cache totals on a 1M window don't
         # get truncated by integer division (e.g. 30000/1000000 → 0 in bash).
         pct=$(python3 -c "
 total, window = $ctx_total, $CONTEXT_WINDOW
 print(min(round(total * 100 / window) if window else 0, 100))
 " 2>/dev/null || echo 0)
-        hb --status idle --inc-iter --context-pct "$pct" --cost-usd "$cost_usd" --model "$AGENT_MODEL"
+        hb --status idle --inc-iter --context-pct "$pct"
         fail_streak=0
     else
         echo "[agent_loop] claude call failed on iter $iter_id" >&2
