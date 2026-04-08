@@ -28,6 +28,26 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
 fi
 
+# Belt-and-suspenders: kill any orphan listener processes for this project
+# that might have survived a previous tmux kill-session (e.g. SIGHUP not
+# propagating cleanly through the bash subshell). This prevents two listeners
+# from polling the same channel and double-acking !c3r commands.
+PROJECT_KEY="$(basename "$REPO")"
+PID_FILE="/tmp/c3r_listen_${PROJECT_KEY}.pid"
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "[launch] killing orphan listener for $PROJECT_KEY (pid=$OLD_PID)"
+        kill -TERM "$OLD_PID" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$OLD_PID" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+fi
+# Also pkill any python listen.py whose argv mentions this state path,
+# as a final safety net in case the PID file was lost
+pkill -f "python3.*listen\.py" -f "$STATE" 2>/dev/null || true
+
 # Read agents list from state.json → newline-separated "name worktree thread_id"
 mapfile -t AGENTS < <(python3 -c "
 import json

@@ -133,6 +133,34 @@ def main() -> int:
     state_path = os.environ.get("C3R_STATE")
     if not state_path or not os.path.isfile(state_path):
         print("[listen] missing C3R_STATE", file=sys.stderr); return 2
+
+    # Singleton lock: refuse to start if another listener is already running
+    # for the same project. Prevents orphan listeners from double-acking
+    # !c3r commands when c3r upgrade / launch leaves a stale process behind.
+    project_key = Path(state_path).parent.parent.name
+    pid_path = Path(f"/tmp/c3r_listen_{project_key}.pid")
+    if pid_path.exists():
+        try:
+            old_pid = int(pid_path.read_text().strip())
+            os.kill(old_pid, 0)  # check if alive
+            print(f"[listen] another listener for project '{project_key}' is already "
+                  f"running (pid={old_pid}). Refusing to start a duplicate. "
+                  f"Kill the old one with: kill {old_pid}", file=sys.stderr)
+            return 3
+        except (ProcessLookupError, ValueError):
+            pass  # stale pid file from a dead process; safe to claim
+    pid_path.write_text(str(os.getpid()))
+
+    # Clean up the PID file on exit (and on SIGHUP/SIGTERM from tmux kill)
+    import atexit, signal
+    def _cleanup(*_):
+        try: pid_path.unlink()
+        except FileNotFoundError: pass
+        sys.exit(0)
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGHUP, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
     channel = os.environ["DISCORD_CHANNEL_ID"]
     me = req("GET", "/users/@me")
     if not me:
@@ -221,6 +249,10 @@ def main() -> int:
                         req("PUT", f"/channels/{tid}/messages/{m['id']}/reactions/{urllib.parse.quote('✅')}/@me")
                     except Exception: pass
 
+            # Save cursors IMMEDIATELY after message processing, not at the
+            # end of the loop iteration. Otherwise an exception in the board
+            # refresh below would prevent cursor advance, causing the next
+            # poll to re-process the same messages and double-ack !c3r cmds.
             save_cursors()
 
             # 3. Periodic status board refresh (every 60s wall-clock)
