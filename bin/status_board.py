@@ -19,7 +19,7 @@ Subcommands:
 
 State JSON schema (written at ~/.c3r/<project>/state.json):
 {
-  "project": "quadrujuggle",
+  "project": "myproject",
   "channel_id": "...",
   "board_message_id": "...",
   "agents": [

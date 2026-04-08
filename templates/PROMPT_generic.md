@@ -55,15 +55,11 @@ context window. The files on disk are your only persistent memory.
    $C3R_BIN/gpu_lock.sh <your command>
    ```
    `$C3R_BIN` is exported by the agent loop. Never launch a bare GPU command.
-   Examples:
-   ```
-   $C3R_BIN/gpu_lock.sh python train.py ...
-   $C3R_BIN/gpu_lock.sh uv run --active python scripts/rsl_rl/train.py --headless ...
-   ```
-   Before your first GPU run, verify the project env is active by checking
-   `which python` and `echo $VIRTUAL_ENV`. The env was pre-activated for you
-   by the agent loop (sourced from `.c3r/env.sh`); if it's missing, read
-   `.c3r/env.sh` and fix it before proceeding.
+   The project's environment (venv, conda, CUDA paths, etc.) has already been
+   activated for you by the agent loop via `.c3r/env.sh`. Before your first
+   GPU run, sanity-check it with `which python` / `echo $VIRTUAL_ENV` /
+   `nvidia-smi`. If something's missing, read `.c3r/env.sh` and fix it
+   before proceeding — do not guess.
 5. **Stay on your branch.** You are on `agent/{{AGENT_NAME}}`. Sibling agents:
    {{SIBLINGS}}. If you need a change in a sibling's scope, write a note to
    `NEEDS_{{SIBLING_UPPER}}.md` and keep moving. Never touch another agent's files.

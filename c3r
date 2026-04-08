@@ -648,14 +648,16 @@ EOF
     echo
     info "Project environment activation (optional)"
     cat <<'EOF'
-  If this project needs a venv or env vars activated before the agent can
-  run (e.g. Isaac Lab, conda, cargo, node nvm), enter the exact bash command
-  that activates it. It gets sourced at the start of every iteration.
+  If this project needs a venv, conda env, or env vars activated before
+  agents can run their commands (compilers, GPU frameworks, language
+  runtimes, etc.), enter the exact bash command that activates it. It gets
+  sourced at the start of every iteration via .c3r/env.sh.
 
-  Examples:
-    source /home/daniel-grant/IsaacLab/.venv311/bin/activate
+  Common patterns:
+    source /path/to/venv/bin/activate
     source ~/miniconda3/bin/activate myenv
     source .venv/bin/activate && export CUDA_VISIBLE_DEVICES=0
+    nvm use 20 && export NODE_ENV=development
 
   Leave blank if nothing is needed.
 EOF
