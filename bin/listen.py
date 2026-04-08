@@ -157,6 +157,12 @@ def main() -> int:
     state0 = load_state(state_path)
     for a in state0.get("agents", []):
         print(f"[listen]   agent {a['name']} → thread {a.get('thread_id')} worktree {a['worktree']}", file=sys.stderr)
+
+    # Auto-refresh the pinned status board every BOARD_REFRESH_SEC, even if
+    # no agent has fired a heartbeat. Iterations can take an hour, so the
+    # board would otherwise show very stale "LAST" timestamps.
+    BOARD_REFRESH_SEC = 60
+    last_board_update = 0.0
     while True:
         try:
             state = load_state(state_path)
@@ -196,6 +202,18 @@ def main() -> int:
                     except Exception: pass
 
             save_cursors()
+
+            # 3. Periodic status board refresh (every 60s wall-clock)
+            if time.time() - last_board_update >= BOARD_REFRESH_SEC:
+                try:
+                    subprocess.run(
+                        [sys.executable, str(C3R_BIN / "status_board.py"),
+                         "update", "--state", state_path],
+                        check=False, timeout=10,
+                    )
+                    last_board_update = time.time()
+                except Exception as e:
+                    print(f"[listen] board refresh failed: {e}", file=sys.stderr)
         except Exception as e:
             print(f"[listen] loop error: {e}", file=sys.stderr)
         time.sleep(POLL_INTERVAL)

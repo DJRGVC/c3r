@@ -7,6 +7,8 @@ C3R_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 C3R_BIN="$C3R_DIR/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/c3r"
 CONFIG_FILE="$CONFIG_DIR/config.env"
+C3R_VERSION="$(cat "$C3R_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo unknown)"
+C3R_GIT_HEAD="$(git -C "$C3R_DIR" rev-parse --short HEAD 2>/dev/null || echo ?)"
 
 if [ -t 1 ]; then
     BOLD=$'\e[1m'; DIM=$'\e[2m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; BLUE=$'\e[34m'; RESET=$'\e[0m'
@@ -88,7 +90,7 @@ cmd_help() {
     case "$topic" in
     ""|overview)
         cat <<EOF
-${BOLD}c3r${RESET} — Continuous Context Claude Research
+${BOLD}c3r${RESET} v${C3R_VERSION} (${C3R_GIT_HEAD}) — Continuous Context Claude Research
 
 Run two-or-more Claude Code research agents in parallel on a local project,
 with Discord threads as the human-in-the-loop interface and git worktrees
@@ -521,6 +523,54 @@ EOF
 # ------------------------------------------------------------------
 # install / uninstall / config
 # ------------------------------------------------------------------
+cmd_version() {
+    echo "c3r version $C3R_VERSION ($C3R_GIT_HEAD)"
+    echo "  installed at: $C3R_DIR"
+    echo "  config:       $CONFIG_FILE"
+}
+
+# Periodic update check — caches result so we only hit the network at most
+# once every 6 hours. Called by `cmd_watch` and `cmd_doctor` automatically.
+# Returns:
+#   0 = up to date (or check skipped)
+#   1 = update available (writes details to /tmp/c3r_update_available)
+check_for_updates() {
+    local cache_path="$CONFIG_DIR/last_update_check"
+    local now; now=$(date +%s)
+    local last=0
+    [ -f "$cache_path" ] && last=$(cat "$cache_path" 2>/dev/null || echo 0)
+    # Force check via env var for debugging
+    if [ -z "${C3R_FORCE_CHECK:-}" ] && [ $((now - last)) -lt 21600 ]; then
+        # Check is fresh; emit cached result if it indicates an update
+        [ -f /tmp/c3r_update_available ] && return 1
+        return 0
+    fi
+    # Do the check (5s timeout, never blocks for long)
+    (
+        cd "$C3R_DIR" || exit 0
+        timeout 5 git fetch --quiet origin 2>/dev/null || exit 0
+        local local_head; local_head=$(git rev-parse HEAD 2>/dev/null)
+        local remote_head; remote_head=$(git rev-parse origin/main 2>/dev/null)
+        if [ -n "$local_head" ] && [ -n "$remote_head" ] && [ "$local_head" != "$remote_head" ]; then
+            # Verify it's a fast-forward (i.e. we'd just pull, not merge)
+            if git merge-base --is-ancestor "$local_head" "$remote_head" 2>/dev/null; then
+                local commits_behind; commits_behind=$(git rev-list --count "$local_head..$remote_head" 2>/dev/null || echo ?)
+                local newest_msg; newest_msg=$(git log "$remote_head" --oneline -1 2>/dev/null || echo "")
+                {
+                    echo "$commits_behind"
+                    echo "$newest_msg"
+                } > /tmp/c3r_update_available
+                exit 1
+            fi
+        fi
+        rm -f /tmp/c3r_update_available
+        exit 0
+    )
+    local rc=$?
+    echo "$now" > "$cache_path"
+    return $rc
+}
+
 cmd_install() {
     local bin_dir="$HOME/.local/bin"
     mkdir -p "$bin_dir"
@@ -555,6 +605,16 @@ cmd_config() {
 cmd_doctor() {
     load_config
     local fails=0
+    info "c3r version $C3R_VERSION ($C3R_GIT_HEAD)"
+    if check_for_updates; then
+        :  # up to date
+    else
+        local n=$(head -1 /tmp/c3r_update_available 2>/dev/null || echo "?")
+        local msg=$(sed -n '2p' /tmp/c3r_update_available 2>/dev/null || echo "")
+        warn "  update available: $n commits behind origin/main"
+        [ -n "$msg" ] && warn "  latest:           $msg"
+        warn "  run: c3r update   (then 'c3r upgrade <project>' for each running project)"
+    fi
     info "environment"
     for v in DISCORD_BOT_TOKEN DISCORD_CHANNEL_ID DISCORD_USER_ID; do
         if [ -n "${!v:-}" ]; then ok "$v set"; else warn "$v not set"; fails=$((fails+1)); fi
@@ -1100,13 +1160,15 @@ cmd_watch() {
     local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
     local interval="${2:-1}"
+    # Background update check (doesn't block startup)
+    check_for_updates >/dev/null 2>&1 &
     # Hide cursor, restore on exit
     printf '\e[?25l'
     trap 'printf "\e[?25h\n"; exit 0' INT TERM EXIT
     while :; do
         # Render a single screen to a buffer, then clear+print atomically
         local buf
-        buf="$(C3R_STATE="$state" C3R_INTERVAL="$interval" python3 - <<'PY'
+        buf="$(C3R_STATE="$state" C3R_INTERVAL="$interval" C3R_VERSION_STR="$C3R_VERSION" python3 - <<'PY'
 import json, os, time
 from datetime import datetime, timezone
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
@@ -1120,7 +1182,15 @@ except OSError:
     cols = 100
 bar = "─" * min(cols, 100)
 paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
-print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
+version = os.environ.get("C3R_VERSION_STR", "?")
+update_marker = ""
+if os.path.exists("/tmp/c3r_update_available"):
+    try:
+        with open("/tmp/c3r_update_available") as f:
+            n = f.readline().strip()
+        update_marker = f"  {YELLOW}↑ {n} update(s) — c3r update{RESET}"
+    except Exception: pass
+print(f"{BOLD}c3r{RESET} {DIM}v{version}{RESET} · {BOLD}{s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}{update_marker}")
 
 # ---- Plan + live usage from claude.ai/api/.../usage ----
 import subprocess
@@ -1989,6 +2059,7 @@ case "$cmd" in
     reset)     cmd_reset     "$@" ;;
     update)    cmd_update    "$@" ;;
     upgrade)   cmd_upgrade   "$@" ;;
+    version|--version|-v) cmd_version ;;
     uninstall) cmd_uninstall "$@" ;;
     doctor)    cmd_doctor    "$@" ;;
     config)    cmd_config    "$@" ;;
