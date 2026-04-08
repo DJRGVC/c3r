@@ -150,10 +150,24 @@ while :; do
     [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null && wait "$watchdog_pid" 2>/dev/null || true
 
     if [ "$iter_ok" = 1 ]; then
-        usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
+        # Context % must include CACHED tokens. Claude Code uses prompt
+        # caching heavily — usage.input_tokens is only the DELTA on a cache
+        # hit (typically <100 tokens), while the actual in-window context
+        # lives in cache_read_input_tokens. Total in-window usage =
+        # input + cache_read + cache_creation. Otherwise context % is always 0%.
+        ctx_total=$(python3 -c "
+import json
+d = json.load(open('$tmp_out'))
+u = d.get('usage', {})
+print(u.get('input_tokens',0) + u.get('cache_read_input_tokens',0) + u.get('cache_creation_input_tokens',0))
+" 2>/dev/null || echo 0)
         cost_usd=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('total_cost_usd',0))" 2>/dev/null || echo 0)
-        pct=$(( usage_in * 100 / CONTEXT_WINDOW ))
-        [ "$pct" -gt 100 ] && pct=100
+        # Use python for the percentage so cache totals on a 1M window don't
+        # get truncated by integer division (e.g. 30000/1000000 → 0 in bash).
+        pct=$(python3 -c "
+total, window = $ctx_total, $CONTEXT_WINDOW
+print(min(round(total * 100 / window) if window else 0, 100))
+" 2>/dev/null || echo 0)
         hb --status idle --inc-iter --context-pct "$pct" --cost-usd "$cost_usd" --model "$AGENT_MODEL"
         fail_streak=0
     else
