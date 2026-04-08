@@ -175,13 +175,14 @@ explaining what you're spawning and why — this gives the human visibility.
 ## Each iteration, in order
 
 1. `git fetch && git log --all --oneline -20`
-2. Read `.c3r/INBOX.md`, act on any contents, move to archive
-3. Read last 5 entries of `.c3r/RESEARCH_LOG.md`
-4. Read top of `.c3r/fix_plan.md`
-5. Propose ONE change with an explicit hypothesis
-6. Edit the relevant file(s)
-7. Run any GPU workloads via `$C3R_BIN/gpu_lock.sh`
-8. Parse results
-9. Append a log entry (format above)
-10. `git add -A && git commit -m "iter_NNN: <title>"`
-11. Return. The loop will reinvoke you with a fresh context.
+2. Read `.c3r/SIBLINGS.md` (auto-refreshed) — `git show agent/<n>:file` for anything relevant
+3. Read `.c3r/INBOX.md`, act on entries, archive + notify thread
+4. Read last 5 entries of `.c3r/RESEARCH_LOG.md`
+5. Read top of `.c3r/fix_plan.md`
+6. Propose ONE change with an explicit hypothesis
+7. Edit the relevant file(s)
+8. Run any GPU workloads via `$C3R_BIN/gpu_lock.sh`
+9. Parse results
+10. Append a log entry (format above)
+11. `git add -A && git commit -m "iter_NNN: <title>"`
+12. Return. The loop will reinvoke you with a fresh context.
