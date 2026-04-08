@@ -4,6 +4,11 @@
 AGENT_NAME="policy"
 AGENT_ROLE="generic"
 AGENT_MODEL="claude-sonnet-4-6"        # claude-sonnet-4-6 | claude-opus-4-6 | claude-haiku-4-5-20251001
+# Context window in tokens. Auto-detected from model name if empty:
+#   opus-4-6, sonnet-4-6 → 1000000 (1M)
+#   haiku-4-5            → 200000
+# Override here if you want to cap earlier for safety.
+CONTEXT_WINDOW=""
 ITERATION_COOLDOWN_SEC=20               # delay between iterations
 MAX_CONSECUTIVE_FAILURES=5              # circuit breaker
 CONTEXT_ALERT_THRESHOLDS="25 50 75 100" # % of 200k window

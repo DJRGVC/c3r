@@ -111,6 +111,22 @@ context window. The files on disk are your only persistent memory.
      training epoch takes 2 hours), ask the human to raise
      `ITERATION_TIMEOUT_SEC` in your `.c3r/agent.conf` via `ask_human.py`.
 
+   **Context window pressure.** Opus 4.6 and Sonnet 4.6 have 1,000,000
+   (1M) tokens each. You have a lot of headroom. However, `RESEARCH_LOG.md`,
+   `SIBLINGS.md`, and `fix_plan.md` grow over time, and every iteration
+   reloads them into the window. If your reported context % climbs past
+   50%, proactively prune:
+     - Move old `RESEARCH_LOG.md` entries (anything >30 iterations back) to
+       `RESEARCH_LOG_ARCHIVE.md` in the same worktree. The archive still
+       counts for git history but is not loaded each iter.
+     - Summarize long PROMPT.md sections that are no longer actionable.
+     - Trim `fix_plan.md` — move completed tasks to a "done" section at
+       the bottom or delete them.
+   Pruning is your responsibility — the harness will not do it for you.
+   At 75% you get an @mention alert; at 100% the iteration may fail
+   outright with a context-overflow error (which counts as a failed iter
+   toward the circuit breaker).
+
 7. **Reading Weights & Biases.** If the project uses wandb, you can read
    metrics from runs (including currently-running ones) via the Python API:
    ```python

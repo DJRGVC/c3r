@@ -41,12 +41,17 @@ AGENT_MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 ITERATION_COOLDOWN_SEC="${ITERATION_COOLDOWN_SEC:-20}"
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
 # Per-iteration wall-clock cap. Default 5400 (90 min).
-# Agents are told about this in PROMPT.md and are expected to save
-# checkpoints frequently during long training so a timeout doesn't waste
-# the run — the next iteration resumes from the latest checkpoint.
-# Override per-agent in agent.conf; set to empty string to disable.
 ITERATION_TIMEOUT_SEC="${ITERATION_TIMEOUT_SEC-5400}"
-CONTEXT_WINDOW=200000  # Claude 4.6 default
+# Context window size in tokens. Claude Opus/Sonnet 4.6 both have 1M
+# context generally available (as of 2026-03-13) at standard pricing.
+# Haiku 4.5 is still 200k. Auto-detect from model name if unset.
+if [ -z "${CONTEXT_WINDOW:-}" ]; then
+    case "$AGENT_MODEL" in
+        *opus-4-6*|*sonnet-4-6*) CONTEXT_WINDOW=1000000 ;;
+        *haiku*)                  CONTEXT_WINDOW=200000  ;;
+        *)                        CONTEXT_WINDOW=200000  ;;
+    esac
+fi
 
 fail_streak=0
 iter_id=0
