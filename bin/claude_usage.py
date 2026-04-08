@@ -55,6 +55,56 @@ def load_config_var(name: str) -> str | None:
             return v.strip().strip('"').strip("'") or None
     return None
 
+def read_browser_cookies() -> dict:
+    """
+    Read claude.ai cookies directly from the user's browser cookie store.
+
+    Tries Firefox first (Snap, classic, and Flatpak install paths). Browser
+    auto-refreshes cf_clearance whenever the user visits claude.ai, so this
+    is the freshest possible source — no manual refresh ever needed as long
+    as the browser has visited claude.ai at least once today.
+
+    Uses SQLite read-only + immutable mode so we don't conflict with the
+    browser if it's running.
+
+    Returns: {name: value} for any of sessionKey, cf_clearance, __cf_bm,
+    lastActiveOrg that exist. Empty dict if nothing readable.
+    """
+    import glob, sqlite3
+    paths = []
+    for pat in (
+        "~/.mozilla/firefox/*.default*/cookies.sqlite",
+        "~/snap/firefox/common/.mozilla/firefox/*.default*/cookies.sqlite",
+        "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*.default*/cookies.sqlite",
+    ):
+        paths.extend(glob.glob(os.path.expanduser(pat)))
+    if not paths:
+        return {}
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+    for path in paths:
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1",
+                                   uri=True, timeout=5)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name, value, expiry FROM moz_cookies "
+                "WHERE host LIKE '%claude.ai%' "
+                "AND name IN ('sessionKey','cf_clearance','__cf_bm','lastActiveOrg') "
+                "ORDER BY expiry DESC"
+            )
+            cookies = {}
+            for name, value, _expiry in cur.fetchall():
+                # First (highest expiry) wins on duplicates
+                if name not in cookies:
+                    cookies[name] = value
+            conn.close()
+            if "sessionKey" in cookies:
+                return cookies
+        except Exception:
+            continue
+    return {}
+
 def fetch_live_plan() -> tuple[str, str]:
     """(plan_name, source). Hits live oauth API; falls back to (stale) creds."""
     if PLAN_CACHE_PATH.exists():
@@ -108,22 +158,12 @@ def fetch_live_plan() -> tuple[str, str]:
     except Exception: pass
     return plan, source
 
-def fetch_live_usage() -> tuple[dict, str | None]:
-    """Hit claude.ai/api/organizations/<uuid>/usage. Returns (data, error_message_or_None)."""
-    sk  = load_config_var("CLAUDE_AI_SESSION_KEY")
-    cfc = load_config_var("CLAUDE_AI_CF_CLEARANCE")
-    cfb = load_config_var("CLAUDE_AI_CF_BM")
-    org = load_config_var("CLAUDE_AI_ORG_UUID")
-    if not (sk and org):
-        return {}, "no claude.ai cookies in config (run: c3r usage-auth)"
-
+def _try_fetch(cookies: dict, org: str) -> tuple[dict, str | None]:
+    """One actual HTTP attempt with the given cookie set."""
     url = f"https://claude.ai/api/organizations/{org}/usage"
-    cookie_parts = [f"sessionKey={sk}", f"lastActiveOrg={org}"]
-    if cfc: cookie_parts.append(f"cf_clearance={cfc}")
-    if cfb: cookie_parts.append(f"__cf_bm={cfb}")
-
+    cookie_parts = [f"{k}={v}" for k, v in cookies.items() if v]
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:139.0) Gecko/20100101 Firefox/139.0",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate",
@@ -138,12 +178,67 @@ def fetch_live_usage() -> tuple[dict, str | None]:
                 raw = gzip.decompress(raw)
             ct = r.headers.get("Content-Type", "")
             if "json" not in ct:
-                return {}, f"non-JSON response (CT={ct}); cookies likely expired"
+                return {}, f"non-JSON response (CT={ct})"
             return json.loads(raw), None
     except urllib.error.HTTPError as e:
-        return {}, f"HTTP {e.code} from claude.ai/api/.../usage — re-run 'c3r usage-auth'"
+        return {}, f"HTTP {e.code}"
     except Exception as e:
         return {}, f"fetch error: {e}"
+
+def fetch_live_usage() -> tuple[dict, str | None, str]:
+    """
+    Try Firefox cookies first (always fresh), then config cookies as fallback.
+    Returns (data, error, source_label).
+    """
+    # 1. Browser cookies (preferred — auto-refreshed by user's browser)
+    fx = read_browser_cookies()
+    if fx.get("sessionKey"):
+        org = fx.get("lastActiveOrg") or load_config_var("CLAUDE_AI_ORG_UUID")
+        if org:
+            data, err = _try_fetch(fx, org)
+            if not err:
+                # Persist freshest cookies to config so a future call can use
+                # them as a fallback if Firefox is offline
+                _persist_cookies(fx, org)
+                return data, None, "browser"
+
+    # 2. Config-stored cookies (fallback when browser unavailable)
+    cfg_cookies = {
+        "sessionKey":    load_config_var("CLAUDE_AI_SESSION_KEY") or "",
+        "cf_clearance":  load_config_var("CLAUDE_AI_CF_CLEARANCE") or "",
+        "__cf_bm":       load_config_var("CLAUDE_AI_CF_BM") or "",
+        "lastActiveOrg": load_config_var("CLAUDE_AI_ORG_UUID") or "",
+    }
+    org_cfg = cfg_cookies["lastActiveOrg"]
+    if cfg_cookies["sessionKey"] and org_cfg:
+        data, err = _try_fetch(cfg_cookies, org_cfg)
+        if not err:
+            return data, None, "config"
+        return {}, f"{err} (config cookies stale; install/open Firefox to auto-refresh, or run 'c3r usage-auth')", "config"
+
+    return {}, "no claude.ai cookies (open Firefox and visit claude.ai once, or run 'c3r usage-auth')", "none"
+
+def _persist_cookies(cookies: dict, org: str) -> None:
+    """Write the freshest browser cookies into ~/.config/c3r/config.env so a
+    later script can use them when the browser isn't running."""
+    if not CONFIG_PATH.exists(): return
+    try:
+        lines = [l for l in CONFIG_PATH.read_text().splitlines()
+                 if not l.startswith("export CLAUDE_AI_") and "claude.ai usage scraping" not in l]
+        while lines and not lines[-1].strip(): lines.pop()
+        lines += [
+            "",
+            "# claude.ai usage scraping (auto-refreshed from Firefox cookies)",
+            f'export CLAUDE_AI_SESSION_KEY="{cookies.get("sessionKey","")}"',
+            f'export CLAUDE_AI_CF_CLEARANCE="{cookies.get("cf_clearance","")}"',
+            f'export CLAUDE_AI_CF_BM="{cookies.get("__cf_bm","")}"',
+            f'export CLAUDE_AI_ORG_UUID="{org}"',
+            "",
+        ]
+        CONFIG_PATH.write_text("\n".join(lines))
+        os.chmod(CONFIG_PATH, 0o600)
+    except Exception:
+        pass
 
 def main() -> int:
     # Cache check
@@ -156,13 +251,13 @@ def main() -> int:
         except Exception: pass
 
     plan, plan_source = fetch_live_plan()
-    usage, err = fetch_live_usage()
+    usage, err, cookie_source = fetch_live_usage()
 
     if err:
         out = {
             "plan": plan, "plan_source": plan_source,
-            "source": "unavailable", "error": err,
-            "computed_at": time.time(),
+            "source": "unavailable", "cookie_source": cookie_source,
+            "error": err, "computed_at": time.time(),
         }
     else:
         out = {
@@ -174,6 +269,7 @@ def main() -> int:
             "seven_day_oauth_apps": usage.get("seven_day_oauth_apps"),
             "extra_usage":       usage.get("extra_usage"),
             "source": "claude.ai_live",
+            "cookie_source": cookie_source,  # 'browser' (freshest) or 'config'
             "error": None,
             "computed_at": time.time(),
         }
