@@ -693,6 +693,30 @@ PY
         local target; target="$(resolve_target "$1")"
         if [ -f "$(state_path "$target")" ]; then
             ok "project state found at $(state_path "$target")"
+            info "static-load audit (per-agent files c3r auto-loads each iter)"
+            python3 - "$(state_path "$target")" <<'PY'
+import json, os, sys
+state = json.load(open(sys.argv[1]))
+LIMIT_TOK = 50_000  # 5% of 1M context
+files = ["PROMPT.md", "RESEARCH_LOG.md", "SIBLINGS.md", "fix_plan.md", "INBOX.md"]
+for a in state["agents"]:
+    if a.get("status") == "stopped": continue
+    total_b = 0
+    breakdown = []
+    for f in files:
+        p = os.path.join(a["worktree"], ".c3r", f)
+        if os.path.exists(p):
+            b = os.path.getsize(p)
+            total_b += b
+            breakdown.append((f, b))
+    tok = total_b // 4
+    pct = tok / 10_000  # of 1M, as a percent
+    flag = " ⚠ over 5% budget!" if tok > LIMIT_TOK else ""
+    print(f"  {a['name']:<14}  {total_b:>7} B  ~{tok:>5} tok  {pct:>4.1f}% of 1M{flag}")
+    if tok > LIMIT_TOK:
+        for f, b in sorted(breakdown, key=lambda x: -x[1])[:3]:
+            print(f"    {b:>7} B  {f}")
+PY
         else
             warn "no project state at $target"
         fi
@@ -1265,7 +1289,7 @@ active_n = sum(1 for a in s["agents"] if a.get("status") != "stopped")
 stopped_n = sum(1 for a in s["agents"] if a.get("status") == "stopped")
 total = len(s["agents"])
 print(f"{BOLD}agents:{RESET} {active_n}/{cap} active" + (f"  {DIM}({stopped_n} stopped){RESET}" if stopped_n else ""))
-hdr = f"{BOLD}{'':2}{'AGENT':<18}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'CTX%':>5}  {'LAST':<12}{'FAIL':>5}{RESET}"
+hdr = f"{BOLD}{'':2}{'AGENT':<18}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'LAST':<12}{'FAIL':>5}{RESET}"
 print(hdr)
 
 # Build parent→children index and render as a tree (DFS)
@@ -1279,8 +1303,6 @@ def render(agent_name, depth):
     icon = ICON.get(st, "·")
     model = a.get("model","").replace("claude-","").replace("-4-6","").replace("-4-5-20251001","")[:10]
     iter_n = f"#{a.get('last_iter',0)}"
-    ctx = a.get("last_context_pct",0)
-    ctx_col = GREEN if ctx<50 else YELLOW if ctx<75 else RED
     ts = a.get("last_iter_ts")
     rel = "—"
     if ts:
@@ -1293,7 +1315,7 @@ def render(agent_name, depth):
     fail_col = RED if fail>=3 else YELLOW if fail>0 else ""
     indent = ("  " + "  " * depth) + ("└─ " if depth > 0 else "")
     name_field = f"{indent}{a['name']}"[:18]
-    print(f"{icon} {name_field:<18} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
+    print(f"{icon} {name_field:<18} {st:<9}{model:<10}{iter_n:<7}{rel:<12}{fail_col}{fail:>5}{RESET}")
     for child in children.get(a["name"], []):
         render(child, depth + 1)
 for root in children.get(None, []):
@@ -1530,7 +1552,7 @@ print(f"\033[1mproject:\033[0m {s['project']}   paused={s.get('paused')}   gpu_l
 for a in s["agents"]:
     paused = os.path.exists(os.path.join(a["worktree"], ".c3r/PAUSED"))
     print(f"  {'⏸' if paused else '●'} {a['name']:<14} {a.get('status','?'):<8} "
-          f"iter={a.get('last_iter',0)}  ctx={a.get('last_context_pct',0)}%  "
+          f"iter={a.get('last_iter',0)}  "
           f"fail_streak={a.get('fail_streak',0)}  {a['worktree']}")
     log = os.path.join(a["worktree"], ".c3r/RESEARCH_LOG.md")
     if os.path.exists(log):

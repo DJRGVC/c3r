@@ -44,16 +44,10 @@ MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 # Per-iteration wall-clock cap. Default 5400 (90 min).
 ITERATION_TIMEOUT_SEC="${ITERATION_TIMEOUT_SEC-5400}"
-# Context window size in tokens. Claude Opus/Sonnet 4.6 both have 1M
-# context generally available (as of 2026-03-13) at standard pricing.
-# Haiku 4.5 is still 200k. Auto-detect from model name if unset.
-if [ -z "${CONTEXT_WINDOW:-}" ]; then
-    case "$AGENT_MODEL" in
-        *opus-4-6*|*sonnet-4-6*) CONTEXT_WINDOW=1000000 ;;
-        *haiku*)                  CONTEXT_WINDOW=200000  ;;
-        *)                        CONTEXT_WINDOW=200000  ;;
-    esac
-fi
+# Auto-rotate RESEARCH_LOG.md when it crosses this many lines (older
+# entries get moved to RESEARCH_LOG_ARCHIVE.md silently before each iter).
+RESEARCH_LOG_ROTATE_LINES="${RESEARCH_LOG_ROTATE_LINES:-300}"
+RESEARCH_LOG_KEEP_TAIL="${RESEARCH_LOG_KEEP_TAIL:-30}"
 
 fail_streak=0
 iter_id=0
@@ -87,6 +81,40 @@ while :; do
     # --- refresh the SIBLINGS.md snapshot so the agent has fresh cross-branch
     # visibility at the top of every iteration
     "$C3R_BIN/siblings_snapshot.py" "$C3R_STATE" "$C3R_AGENT_NAME" 2>/dev/null || true
+
+    # --- auto-rotate RESEARCH_LOG.md so c3r's static load stays bounded.
+    # When the log crosses RESEARCH_LOG_ROTATE_LINES (default 300), move
+    # all but the last RESEARCH_LOG_KEEP_TAIL (default 30) lines to the
+    # archive file, prepending a marker. Silent — agent doesn't need to
+    # think about it.
+    LOG_FILE="$C3R_WORKTREE/.c3r/RESEARCH_LOG.md"
+    if [ -f "$LOG_FILE" ]; then
+        log_lines=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$log_lines" -gt "$RESEARCH_LOG_ROTATE_LINES" ]; then
+            ARCHIVE_FILE="$C3R_WORKTREE/.c3r/RESEARCH_LOG_ARCHIVE.md"
+            tail_n=$RESEARCH_LOG_KEEP_TAIL
+            head_n=$((log_lines - tail_n))
+            ts=$(date -u '+%Y-%m-%d %H:%M UTC')
+            {
+                [ -f "$ARCHIVE_FILE" ] || echo "# RESEARCH_LOG_ARCHIVE"
+                echo
+                echo "## auto-rotated at $ts (older entries; tail kept in RESEARCH_LOG.md)"
+                echo
+                head -n "$head_n" "$LOG_FILE"
+            } >> "${ARCHIVE_FILE}.tmp"
+            [ -f "$ARCHIVE_FILE" ] && cat "$ARCHIVE_FILE" >> "${ARCHIVE_FILE}.tmp"
+            mv "${ARCHIVE_FILE}.tmp" "$ARCHIVE_FILE"
+            {
+                echo "# RESEARCH_LOG.md"
+                echo
+                echo "_(older entries auto-archived to RESEARCH_LOG_ARCHIVE.md at $ts)_"
+                echo
+                tail -n "$tail_n" "$LOG_FILE"
+            } > "${LOG_FILE}.tmp"
+            mv "${LOG_FILE}.tmp" "$LOG_FILE"
+            echo "[agent_loop] auto-rotated RESEARCH_LOG.md ($log_lines → ~$tail_n lines)" >&2
+        fi
+    fi
 
     # --- iteration budget self-kill (sub-agents) ---
     if [ "${MAX_ITERATIONS:-0}" -gt 0 ] 2>/dev/null && [ "$iter_id" -ge "$MAX_ITERATIONS" ]; then
@@ -150,45 +178,8 @@ while :; do
     [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null && wait "$watchdog_pid" 2>/dev/null || true
 
     if [ "$iter_ok" = 1 ]; then
-        # Context % must include CACHED tokens. Claude Code uses prompt
-        # caching heavily — usage.input_tokens is only the DELTA on a cache
-        # hit (typically <100 tokens), while the actual in-window context
-        # lives in cache_read_input_tokens. Total in-window usage =
-        # input + cache_read + cache_creation. Otherwise context % is always 0%.
-        ctx_total=$(python3 -c "
-import json
-d = json.load(open('$tmp_out'))
-u = d.get('usage', {})
-print(u.get('input_tokens',0) + u.get('cache_read_input_tokens',0) + u.get('cache_creation_input_tokens',0))
-" 2>/dev/null || echo 0)
-        pct=$(python3 -c "
-total, window = $ctx_total, $CONTEXT_WINDOW
-print(min(round(total * 100 / window) if window else 0, 100))
-" 2>/dev/null || echo 0)
-        hb --status idle --inc-iter --context-pct "$pct"
+        hb --status idle --inc-iter
         fail_streak=0
-
-        # Auto-trigger compaction at high context by injecting a directive
-        # into INBOX. The agent reads INBOX at the top of every iter and
-        # acts on the directive before any other work. Idempotent: skips
-        # if a directive is already pending. NO Discord notification here
-        # — heartbeat.py already fires the user-facing alert at the same
-        # threshold and we don't want double-pings.
-        if [ "$pct" -ge 75 ] 2>/dev/null && ! grep -q "AUTO-COMPACT REQUIRED" "$C3R_WORKTREE/.c3r/INBOX.md" 2>/dev/null; then
-            python3 - "$C3R_WORKTREE/.c3r/INBOX.md" "$pct" "$C3R_AGENT_NAME" <<'PY'
-import sys, pathlib
-from datetime import datetime, timezone
-inbox_path, pct, agent = sys.argv[1:]
-inbox = pathlib.Path(inbox_path)
-inbox.parent.mkdir(parents=True, exist_ok=True)
-ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
-    inbox.write_text("# INBOX\n")
-with inbox.open("a") as f:
-    f.write(f"\n---\n[{ts}] system → {agent}\nMSG: 🚨 AUTO-COMPACT REQUIRED — your last iteration's context was at {pct}%. Your NEXT iteration MUST be a dedicated compaction iteration per PROMPT rule 6: read RESEARCH_LOG.md, summarize old entries into a Compacted Summary block, move verbatim entries to RESEARCH_LOG_ARCHIVE.md, prune fix_plan.md, commit. Do NOT do anything else this iteration. After compaction, normal work resumes the iteration after.\n")
-print(f"[agent_loop] injected auto-compact directive into {inbox_path}", file=sys.stderr)
-PY
-        fi
     else
         echo "[agent_loop] claude call failed on iter $iter_id" >&2
         tail -20 "$tmp_out" >&2 || true

@@ -215,6 +215,7 @@ def render_embed(state: dict) -> dict:
     NAME_W = 22
     MODEL_W = 6
     ITER_W = 5
+    LAST_W = 12
 
     block_lines = []
 
@@ -250,34 +251,24 @@ def render_embed(state: dict) -> dict:
         glyph = STATUS_GLYPH.get(st, ANSI_GREY + "·" + ANSI_RESET)
         model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:MODEL_W]
         iter_n = f"#{a.get('last_iter', 0)}"
-        ctx = a.get("last_context_pct", 0)
-        bar = _colored_bar(ctx, 10)
+        last = _rel_time(a.get("last_iter_ts"))
         prefix = "  " * depth + ("└ " if depth > 0 else "")
         label = (prefix + a["name"])[:NAME_W - 2]
         block_lines.append(
             f"  {glyph} {label:<{NAME_W - 2}} "
             f"{model_short:<{MODEL_W}} "
             f"{iter_n:<{ITER_W}} "
-            f"{bar}  "
-            f"{ctx:>3}%"
+            f"{ANSI_DIM}{last:<{LAST_W}}{ANSI_RESET}"
         )
         # Indented 8 spaces so badges visibly nest under the agent name.
-        # Discord's narrow code-block viewport has ~50 chars of usable width
-        # at this indent — plenty for our short messages.
         badge_indent = "        "
         badges = []
         if a.get("fail_streak", 0) >= 3:
             badges.append(f"fails={a['fail_streak']}")
-        if ctx >= 90 and st != "stopped":
-            badges.append("context full")
-        elif ctx >= 75 and st != "stopped":
-            badges.append("context high")
         if a.get("status") == "error":
             badges.append("last iter failed")
         if badges:
             block_lines.append(f"{badge_indent}{ANSI_RED}⚠ {' · '.join(badges)}{ANSI_RESET}")
-        # Cooperative pause: project is paused but this agent's iter is still
-        # running. Surface that the agent is winding down naturally.
         if state.get("paused") and st == "running":
             block_lines.append(
                 f"{badge_indent}{ANSI_YELLO}⏸ pausing after iter {iter_n}{ANSI_RESET}"
