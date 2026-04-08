@@ -658,11 +658,24 @@ except Exception as e:
 
     if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
         info "Discord bot reachability"
-        if python3 - <<PY
+        # When a target path is given, prefer that project's channel_id from
+        # state.json over the env var (config.env holds only one channel,
+        # which may be from a different project).
+        local probe_channel="$DISCORD_CHANNEL_ID"
+        if [ "${1:-}" ] && [ -f "$(state_path "$(resolve_target "$1")")" ]; then
+            probe_channel=$(python3 -c "import json;print(json.load(open('$(state_path "$(resolve_target "$1")")'))['channel_id'])" 2>/dev/null || echo "$DISCORD_CHANNEL_ID")
+        fi
+        if PROBE_CHANNEL="$probe_channel" python3 - <<'PY'
 import json, os, urllib.request
 req = urllib.request.Request(
-    f"https://discord.com/api/v10/channels/{os.environ['DISCORD_CHANNEL_ID']}",
-    headers={"Authorization": f"Bot {os.environ['DISCORD_BOT_TOKEN']}"},
+    f"https://discord.com/api/v10/channels/{os.environ['PROBE_CHANNEL']}",
+    headers={
+        "Authorization": f"Bot {os.environ['DISCORD_BOT_TOKEN']}",
+        # Discord REST requires a User-Agent on all bot requests; without
+        # it, the edge returns 403. (This was a doctor-only bug — every
+        # other c3r Discord call already sets a UA.)
+        "User-Agent": "c3r-doctor (https://github.com/DJRGVC/c3r, 0.3)",
+    },
 )
 try:
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -671,8 +684,8 @@ try:
 except Exception as e:
     print(f"ERROR: {e}"); raise SystemExit(1)
 PY
-        then ok "bot can read the channel"
-        else warn "bot cannot read the channel — check token & invite perms"; fails=$((fails+1)); fi
+        then ok "bot can read channel $probe_channel"
+        else warn "bot cannot read channel $probe_channel — check token & invite perms"; fails=$((fails+1)); fi
     fi
 
     if [ "${1:-}" ]; then
