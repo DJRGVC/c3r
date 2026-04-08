@@ -123,6 +123,7 @@ ${BOLD}HUMAN ↔ AGENT${RESET}
   ask "question" [--choices]   send yourself a Discord question (test harness)
   listen [path]                 start the Discord → INBOX listener (auto-run by launch)
   board [path] (bump|update)    manage the persistent Discord status board
+  usage-auth                    refresh claude.ai cookies for live usage display
 
 ${BOLD}MAINTENANCE${RESET}
   update                  git pull c3r itself (template/tool updates)
@@ -1044,37 +1045,59 @@ bar = "─" * min(cols, 100)
 paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[running]" + RESET)
 print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
 
-# ---- Plan + cost line ----
-plan = os.environ.get("C3R_PLAN", "unknown")
-# Effective weekly $ budget per plan (rough; absolute hard caps are time-based,
-# these dollar values are conservative estimates from published Anthropic docs)
-PLAN_BUDGETS = {"pro": 30.0, "max-5x": 150.0, "max-20x": 600.0, "api": None, "unknown": None}
-budget = PLAN_BUDGETS.get(plan)
-usage_path = os.path.expanduser("~/.config/c3r/usage.json")
-week_total = 0.0
-month_total = 0.0
-if os.path.exists(usage_path):
+# ---- Plan + live usage from claude.ai/api/.../usage ----
+import subprocess
+plan = "?"
+five_h = seven_d = seven_d_sonnet = seven_d_opus = None
+usage_err = None
+usage_source = "unknown"
+try:
+    proc = subprocess.run([os.environ.get("C3R_BIN", "") + "/claude_usage.py"],
+                          capture_output=True, text=True, timeout=8)
+    if proc.returncode == 0:
+        u = json.loads(proc.stdout)
+        plan = u.get("plan", "?")
+        usage_source = u.get("source", "?")
+        usage_err = u.get("error")
+        five_h = u.get("five_hour")
+        seven_d = u.get("seven_day")
+        seven_d_sonnet = u.get("seven_day_sonnet")
+        seven_d_opus = u.get("seven_day_opus")
+except Exception as e:
+    usage_err = f"call failed: {e}"
+
+def _pct_color(p):
+    if p is None: return GREY
+    if p < 50: return GREEN
+    if p < 80: return YELLOW
+    return RED
+
+def _fmt_window(label, w):
+    if not w or not isinstance(w, dict):
+        return f"{label}: {DIM}—{RESET}"
+    p = w.get("utilization")
+    if p is None: return f"{label}: {DIM}—{RESET}"
+    col = _pct_color(p)
+    return f"{label}: {col}{p:>3.0f}%{RESET}"
+
+opus_str = ("  ·  " + _fmt_window("7d-opus", seven_d_opus)) if seven_d_opus else ""
+print(f"plan: {BOLD}{plan}{RESET}  ·  "
+      + _fmt_window("5h", five_h) + "  ·  "
+      + _fmt_window("7d", seven_d) + "  ·  "
+      + _fmt_window("7d-sonnet", seven_d_sonnet)
+      + opus_str)
+if usage_err:
+    print(f"  {YELLOW}⚠ usage: {usage_err}{RESET}")
+elif usage_source == "claude.ai_live" and five_h and five_h.get("resets_at"):
+    from datetime import datetime
     try:
-        u = json.load(open(usage_path))
-        from datetime import date
-        iso_y, iso_w, _ = date.today().isocalendar()
-        week_key = f"{iso_y}-W{iso_w:02d}"
-        week_total = sum(u.get(week_key, {}).values()) if isinstance(u.get(week_key), dict) else 0.0
-        # Sum the last 30 daily entries for "month"
-        for day_key, models in (u.get("daily") or {}).items():
-            if isinstance(models, dict):
-                month_total += sum(models.values())
+        dt = datetime.fromisoformat(five_h["resets_at"].replace("Z","+00:00"))
+        secs = int((dt - datetime.now(dt.tzinfo)).total_seconds())
+        if secs > 0:
+            rel = (f"{secs//3600}h{(secs%3600)//60:02d}m"
+                   if secs >= 3600 else f"{secs//60}m")
+            print(f"  {DIM}5h window resets in {rel}  ·  source: claude.ai (live){RESET}")
     except Exception: pass
-plan_str = f"plan: {BOLD}{plan}{RESET}"
-if budget and week_total > 0:
-    pct = (week_total / budget) * 100
-    pct_col = GREEN if pct < 50 else YELLOW if pct < 80 else RED
-    cost_str = f"week: ${week_total:.2f} ({pct_col}{pct:.0f}%{RESET} of ~${budget:.0f} est)  ·  month: ${month_total:.2f}"
-elif budget:
-    cost_str = f"week: $0.00 (0% of ~${budget:.0f} est)  ·  month: ${month_total:.2f}"
-else:
-    cost_str = f"week: ${week_total:.2f}  ·  month: ${month_total:.2f}"
-print(f"{plan_str}  ·  {cost_str}")
 print(bar)
 cap = s.get("max_agents", "?")
 active_n = sum(1 for a in s["agents"] if a.get("status") != "stopped")
@@ -1179,6 +1202,105 @@ PY
         [ "${key:-}" = "q" ] && break
     done
     printf '\e[?25h\n'
+}
+
+cmd_usage_auth() {
+    cat <<'EOF'
+
+c3r usage-auth — refresh claude.ai cookies for live usage scraping
+
+To grab a fresh curl from your browser:
+  1. Open https://claude.ai/settings/usage in Chrome or Firefox
+  2. Press F12 → Network tab → filter "Fetch/XHR"
+  3. Reload the page (Cmd/Ctrl+R)
+  4. Find a request to /api/organizations/<uuid>/usage
+  5. Right-click it → Copy → Copy as cURL
+  6. Paste the entire curl command below, then press Enter on a blank line
+
+Paste your curl now (end with a blank line):
+EOF
+    local input="" line
+    while IFS= read -r line; do
+        [ -z "$line" ] && break
+        input+="$line"$'\n'
+    done
+    [ -n "$input" ] || die "no input received"
+
+    python3 - "$input" <<'PY'
+import re, sys, os, pathlib
+curl = sys.argv[1]
+def grab(pat, default=None):
+    m = re.search(pat, curl)
+    return m.group(1) if m else default
+url = grab(r"['\"](https://claude\.ai/api/organizations/[a-f0-9-]+/[^'\"]+)['\"]")
+if not url:
+    print("[usage-auth] could not find https://claude.ai/api/organizations/.../... URL in input", file=sys.stderr)
+    sys.exit(2)
+org = re.search(r"/organizations/([a-f0-9-]+)/", url).group(1)
+cookie_header = grab(r"-H ['\"]Cookie: ([^'\"]+)['\"]") or grab(r"--cookie ['\"]([^'\"]+)['\"]")
+if not cookie_header:
+    print("[usage-auth] no Cookie header found in curl", file=sys.stderr)
+    sys.exit(3)
+
+cookies = {}
+for kv in cookie_header.split(";"):
+    kv = kv.strip()
+    if "=" in kv:
+        k, v = kv.split("=", 1)
+        cookies[k.strip()] = v.strip()
+
+session_key  = cookies.get("sessionKey")
+cf_clearance = cookies.get("cf_clearance")
+cf_bm        = cookies.get("__cf_bm")
+
+if not session_key:
+    print("[usage-auth] sessionKey cookie not found", file=sys.stderr); sys.exit(4)
+
+cfg_path = pathlib.Path.home() / ".config/c3r/config.env"
+cfg_path.parent.mkdir(parents=True, exist_ok=True)
+existing = cfg_path.read_text() if cfg_path.exists() else ""
+# Strip any previous CLAUDE_AI_* lines
+lines = [l for l in existing.splitlines() if not l.startswith("export CLAUDE_AI_") and "claude.ai usage scraping" not in l]
+# Drop trailing blanks
+while lines and not lines[-1].strip(): lines.pop()
+lines += [
+    "",
+    "# claude.ai usage scraping (live numbers from /api/organizations/<uuid>/usage)",
+    "# Refresh by re-running 'c3r usage-auth'. cf_clearance expires in hours.",
+    f'export CLAUDE_AI_SESSION_KEY="{session_key}"',
+    f'export CLAUDE_AI_CF_CLEARANCE="{cf_clearance or ""}"',
+    f'export CLAUDE_AI_CF_BM="{cf_bm or ""}"',
+    f'export CLAUDE_AI_ORG_UUID="{org}"',
+    "",
+]
+cfg_path.write_text("\n".join(lines))
+os.chmod(cfg_path, 0o600)
+# Bust cache so the next watch tick re-fetches
+for p in ("/tmp/c3r_claude_usage.json", "/tmp/c3r_plan.json"):
+    try: os.unlink(p)
+    except FileNotFoundError: pass
+print(f"[usage-auth] saved org_uuid={org[:8]}... sessionKey={session_key[:20]}... cf_clearance={'yes' if cf_clearance else 'no'} cf_bm={'yes' if cf_bm else 'no'}")
+PY
+    [ $? -eq 0 ] && ok "credentials saved → $CONFIG_FILE  ·  testing now..."
+
+    # Smoke test
+    if "$C3R_BIN/claude_usage.py" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+src = d.get('source')
+if src == 'claude.ai_live':
+    fh = d.get('five_hour') or {}
+    sd = d.get('seven_day') or {}
+    print(f'  ✓ live data flowing: 5h={fh.get(\"utilization\", \"?\")}% · 7d={sd.get(\"utilization\", \"?\")}%')
+    sys.exit(0)
+else:
+    print(f'  ✗ test fetch failed: {d.get(\"error\", \"unknown\")}')
+    sys.exit(1)
+"; then
+        ok "live usage tracking is working"
+    else
+        warn "fetch failed — your cookies may already be stale (cf_clearance is short-lived)"
+    fi
 }
 
 cmd_attach() {
@@ -1663,6 +1785,7 @@ case "$cmd" in
     install)   cmd_install   "$@" ;;
     board)     cmd_board     "$@" ;;
     listen)    cmd_listen    "$@" ;;
+    usage-auth) cmd_usage_auth "$@" ;;
     help|-h|--help) cmd_help "$@" ;;
     *) cmd_help; die "unknown command: $cmd" ;;
 esac
