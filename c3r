@@ -1824,14 +1824,60 @@ cmd_upgrade() {
     local state; state="$(require_state "$target")"
 
     info "upgrading $target"
-    info "  1/4: pulling latest c3r"
+    info "  1/5: pulling latest c3r"
     git -C "$C3R_DIR" pull --ff-only --quiet || warn "  c3r pull failed (continuing)"
 
-    info "  2/4: stopping tmux session if running"
     local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
-    tmux has-session -t "$session" 2>/dev/null && tmux kill-session -t "$session" 2>/dev/null && ok "  killed $session" || true
 
-    info "  3/4: re-rendering PROMPT.md, agent.conf, .claude/settings.json in each worktree"
+    # Cooperative pause first so any in-flight training run can checkpoint
+    # and finish cleanly before we restart the loop
+    info "  2/5: cooperative pause (waits for in-flight iterations to finish)"
+    if tmux has-session -t "$session" 2>/dev/null; then
+        # Touch the pause flag in each worktree
+        python3 - "$state" <<'PY'
+import json, sys, pathlib
+s = json.load(open(sys.argv[1]))
+for a in s["agents"]:
+    if a.get("status") != "stopped":
+        pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").touch()
+PY
+        ok "  PAUSE flag set; waiting up to 90s for agents to enter paused state"
+
+        # Poll status.json for up to 90 seconds, looking for all active
+        # agents to be in 'paused' or 'idle' state (i.e. not 'running')
+        local waited=0
+        while [ "$waited" -lt 90 ]; do
+            local still_running
+            still_running=$(python3 - "$state" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+running = [a["name"] for a in s["agents"]
+           if a.get("status") == "running" and a.get("status") != "stopped"]
+print(len(running), *running)
+PY
+)
+            local n=$(echo "$still_running" | awk '{print $1}')
+            if [ "$n" = "0" ]; then
+                ok "  all agents idle"
+                break
+            fi
+            printf "\r  waiting for %s active agents to finish their iteration... (%ds)" "$n" "$waited"
+            sleep 5
+            waited=$((waited + 5))
+        done
+        echo
+        if [ "$waited" -ge 90 ]; then
+            warn "  90s timeout reached; some agents may still be mid-iteration. Killing anyway."
+        fi
+
+        info "  3/5: stopping tmux session"
+        tmux kill-session -t "$session" 2>/dev/null && ok "  killed $session" || true
+    else
+        info "  2/5: no tmux session running (skipping pause)"
+        info "  3/5: nothing to stop"
+    fi
+
+    info "  4/5: re-rendering PROMPT.md, agent.conf, .claude/settings.json in each worktree"
     python3 - "$state" "$C3R_DIR" <<'PY'
 import json, os, re, sys
 from pathlib import Path
@@ -1886,7 +1932,18 @@ for a in state["agents"]:
 print(f"\nupgraded {upgraded} worktree(s)")
 PY
 
-    info "  4/4: relaunching"
+    # Clear the pause flags we set in step 2 so agents come back online
+    python3 - "$state" <<'PY'
+import json, sys, pathlib
+s = json.load(open(sys.argv[1]))
+for a in s["agents"]:
+    try: pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").unlink()
+    except FileNotFoundError: pass
+s["paused"] = False
+json.dump(s, open(sys.argv[1], "w"), indent=2)
+PY
+
+    info "  5/5: relaunching"
     cmd_launch "$target"
 
     ok "upgrade complete for $target"
