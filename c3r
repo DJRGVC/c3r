@@ -805,39 +805,47 @@ for a in s["agents"]:
     print(f"  {icon} {a['name']:<12} {st:<9}{model:<10}{iter_n:<7}{ctx_col}{ctx:>4}%{RESET}  {rel:<12}{fail_col}{fail:>5}{RESET}")
 print(bar)
 
-# ---- INBOX panel (always visible, above log snippets) ----
+# ---- INBOX panel: latest 3 messages across all agents, with responses ----
 import re
-def parse_msgs(path, status):
+ENTRY_RE = re.compile(
+    r'---\s*\n'
+    r'\[([^\]]+)\]\s*([^\n→]+?)\s*→\s*(\w+)\s*\n'
+    r'MSG:\s*(.+?)(?=\n(?:RESP:|---|\Z))'
+    r'(?:\nRESP:\s*(.+?))?(?=\n---|\Z)',
+    re.DOTALL,
+)
+def parse_msgs(path, has_response):
     if not os.path.exists(path): return []
-    text = open(path).read()
     out = []
-    for m in re.finditer(r'\*\*([^*]+)\*\*\s*·\s*([^\n]*)\n\n(.+?)(?=\n---|\Z)', text, re.DOTALL):
-        author, ts, body = m.groups()
-        first = body.strip().splitlines()[0] if body.strip() else ""
-        out.append({"status": status, "author": author.strip(), "ts": ts.strip(), "body": first})
+    for m in ENTRY_RE.finditer(open(path).read()):
+        ts, author, agent, msg, resp = m.groups()
+        out.append({
+            "ts": ts.strip(),
+            "author": author.strip(),
+            "agent": agent.strip(),
+            "msg": " ".join(msg.strip().splitlines()),
+            "resp": (resp or "").strip() if has_response else "",
+            "unread": not has_response,
+        })
     return out
 
 all_msgs = []
 for a in s["agents"]:
-    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX.md"), "unread"):
-        msg["agent"] = a["name"]; all_msgs.append(msg)
-    for msg in parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX_ARCHIVE.md"), "read"):
-        msg["agent"] = a["name"]; all_msgs.append(msg)
+    all_msgs += parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX.md"), False)
+    all_msgs += parse_msgs(os.path.join(a["worktree"], ".c3r/INBOX_ARCHIVE.md"), True)
 all_msgs.sort(key=lambda m: m["ts"], reverse=True)
 
-print(f"{BOLD}INBOX{RESET}  {DIM}(latest 5 · 📬 unread, ✉ read){RESET}")
+print(f"{BOLD}INBOX{RESET}  {DIM}(last 3 · 📬 unread · ✉ read+responded){RESET}")
 if not all_msgs:
-    print(f"  {DIM}(no messages yet — send via CLI: c3r ping <agent> <msg>  or reply in a Discord thread){RESET}")
+    print(f"  {DIM}(no messages — send via: c3r ping <agent> <msg>  or reply in a thread){RESET}")
 else:
-    for msg in all_msgs[:5]:
-        if msg["status"] == "unread":
-            icon, col, lbl = "📬", YELLOW, "UNREAD"
-        else:
-            icon, col, lbl = "✉", GREEN, "read  "
-        tag = f"→{msg['agent']}"
-        body = msg["body"][: cols - 36]
-        print(f"  {col}{icon} {lbl}{RESET}  {BOLD}{tag:<12}{RESET}  {body}")
-        print(f"               {DIM}{msg['ts']}  from {msg['author']}{RESET}")
+    for m in all_msgs[:3]:
+        icon, col, lbl = ("📬", YELLOW, "UNREAD") if m["unread"] else ("✉", GREEN, "read  ")
+        tag = f"→{m['agent']}"
+        print(f"  {col}{icon} {lbl}{RESET} {BOLD}{tag:<10}{RESET} {DIM}{m['ts']}  from {m['author']}{RESET}")
+        print(f"      {BOLD}msg:{RESET}  {m['msg'][:cols-12]}")
+        if m["resp"]:
+            print(f"      {CYAN}resp:{RESET} {m['resp'][:cols-12]}")
 print(bar)
 
 # Last 2 log lines per agent

@@ -12,13 +12,31 @@ context window. The files on disk are your only persistent memory.
    thing. If you want to change two, split it into sequential iterations.
 2. **Read state before acting.** At the very start of every iteration, in order:
    - `git fetch && git log --all --oneline -20` — see what sibling agents have done
-   - `cat .c3r/INBOX.md` — read any messages the human left for you since last iter.
-     After reading, (a) move the contents verbatim to `.c3r/INBOX_ARCHIVE.md`,
-     (b) rewrite `.c3r/INBOX.md` to just `# INBOX\n\n<!-- empty -->\n`, and
-     (c) if there was new content, post a brief acknowledgment in your Discord
-     thread so the human can see you got it:
-         $C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "✓ got your note — <1-line paraphrase of what you'll do about it>"
-     Do this BEFORE starting the main iteration work.
+   - **Process `.c3r/INBOX.md`** — this is critical, do it BEFORE other work.
+     The file contains zero or more entries in this exact format:
+     ```
+     ---
+     [2026-04-07 23:45 UTC] Daniel G → reader
+     MSG: single-line message text
+     ```
+     For EACH entry (there may be multiple):
+     (a) Decide how you'll act on it. Write a 1-line response.
+     (b) Append the entry to `.c3r/INBOX_ARCHIVE.md` with an added RESP line:
+         ```
+         ---
+         [2026-04-07 23:45 UTC] Daniel G → reader
+         MSG: single-line message text
+         RESP: will do — <concrete 1-line action you'll take this iter>
+         ```
+     (c) Post the same response to your Discord thread:
+         `$C3R_BIN/notify.py --thread "$C3R_AGENT_THREAD_ID" "✓ <response text>"`
+     (d) After processing every entry, rewrite `.c3r/INBOX.md` to exactly:
+         ```
+         # INBOX
+
+         <!-- empty -->
+         ```
+     Do all of (a)-(d) BEFORE starting the main iteration work.
    - Last 5 entries of `.c3r/RESEARCH_LOG.md` — your own history
    - Top of `.c3r/fix_plan.md` — the experiment/task queue
 3. **Append-only log.** Every iteration produces a `RESEARCH_LOG.md` entry, even on

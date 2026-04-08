@@ -52,14 +52,25 @@ def post(target, content):
     return req("POST", f"/channels/{target}/messages", {"content": content, "allowed_mentions": {"parse": []}})
 
 def append_inbox(worktree: str, author: str, content: str):
+    """Append a message to INBOX.md in a strict parseable format:
+
+        ---
+        [YYYY-MM-DD HH:MM UTC] <author> → <agent>
+        MSG: <single-line message>
+
+    The agent later moves this to INBOX_ARCHIVE.md and appends `RESP: ...`.
+    """
     inbox = Path(worktree) / ".c3r" / "INBOX.md"
     inbox.parent.mkdir(parents=True, exist_ok=True)
     if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
-        inbox.write_text("# INBOX\n\n")
+        inbox.write_text("# INBOX\n")
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    agent = Path(worktree).name.split("-")[-1]
+    # Collapse message to one line (strip newlines) for easy parsing
+    one_line = " ".join(content.splitlines()).strip()
     with inbox.open("a") as f:
-        f.write(f"\n---\n**{author}** · {ts}\n\n{content}\n")
-    print(f"[listen] inbox ← {worktree} from {author}: {content[:60]}", file=sys.stderr)
+        f.write(f"\n---\n[{ts}] {author} → {agent}\nMSG: {one_line}\n")
+    print(f"[listen] inbox ← {worktree} from {author}: {one_line[:60]}", file=sys.stderr)
 
 # ---------- channel command handlers ----------
 
