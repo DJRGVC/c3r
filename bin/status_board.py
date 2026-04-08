@@ -84,31 +84,72 @@ def _ctx_glyph(pct: int) -> str:
     if pct >  0:  return "█░░░░"
     return "░░░░░"
 
-def fetch_usage_summary() -> str:
-    """Call claude_usage.py and return a one-liner for the board header.
-    Returns empty string if usage data is unavailable (so the board still
-    renders cleanly).
-    """
+def fetch_usage_data() -> dict | None:
+    """Call claude_usage.py and return the structured data (dict) or None
+    if unavailable. Lets the renderer build proper embed fields with
+    progress bars and reset timestamps."""
     import subprocess, sys as _sys
     try:
         usage_script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "claude_usage.py")
         proc = subprocess.run([_sys.executable, usage_script], capture_output=True, text=True, timeout=8)
-        if proc.returncode != 0: return ""
+        if proc.returncode != 0: return None
         d = json.loads(proc.stdout)
-        if d.get("source") != "claude.ai_live": return ""
-        plan = d.get("plan", "?")
-        fh = (d.get("five_hour") or {}).get("utilization")
-        sd = (d.get("seven_day") or {}).get("utilization")
-        sd_son = (d.get("seven_day_sonnet") or {}).get("utilization")
-        sd_op = (d.get("seven_day_opus") or {}).get("utilization")
-        parts = [f"plan: **{plan}**"]
-        if fh is not None: parts.append(f"5h: {fh:.0f}%")
-        if sd is not None: parts.append(f"7d: {sd:.0f}%")
-        if sd_son is not None: parts.append(f"7d-sonnet: {sd_son:.0f}%")
-        if sd_op is not None: parts.append(f"7d-opus: {sd_op:.0f}%")
-        return "  ·  ".join(parts)
+        if d.get("source") != "claude.ai_live": return None
+        return d
+    except Exception:
+        return None
+
+def _bar10(pct: float) -> str:
+    """10-cell unicode progress bar for embed fields."""
+    if pct is None: return "──────────"
+    filled = int(round(pct / 10))
+    filled = max(0, min(10, filled))
+    return "█" * filled + "░" * (10 - filled)
+
+def _resets_in(ts_str: str | None) -> str:
+    if not ts_str: return ""
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z","+00:00"))
+        secs = int((dt - datetime.now(dt.tzinfo)).total_seconds())
+        if secs <= 0: return "now"
+        if secs < 3600: return f"{secs // 60}m"
+        if secs < 86400: return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+        return f"{secs // 86400}d{(secs % 86400) // 3600}h"
     except Exception:
         return ""
+
+def _usage_fields(usage: dict | None) -> list:
+    """Build embed fields for plan + usage windows. Returns [] if no data."""
+    if not usage: return []
+    plan = usage.get("plan", "?")
+    fh = usage.get("five_hour") or {}
+    sd = usage.get("seven_day") or {}
+    sd_son = usage.get("seven_day_sonnet") or {}
+    sd_opus = usage.get("seven_day_opus") or {}
+
+    fields = [{"name": "Plan", "value": f"**{plan}**", "inline": True}]
+
+    def fmt_window(label, w):
+        p = w.get("utilization")
+        if p is None: return None
+        bar = _bar10(p)
+        rel = _resets_in(w.get("resets_at"))
+        body = f"`{bar}`\n**{p:.0f}%**" + (f" · resets {rel}" if rel else "")
+        return {"name": label, "value": body, "inline": True}
+
+    for label, w in (("5h window", fh), ("7d window", sd)):
+        f = fmt_window(label, w)
+        if f: fields.append(f)
+    # Per-model on a second row
+    son = fmt_window("7d · sonnet", sd_son)
+    opus = fmt_window("7d · opus", sd_opus)
+    if son or opus:
+        # Discord embed inline fields are 3 per row; pad to keep alignment
+        if son: fields.append(son)
+        if opus: fields.append(opus)
+        if (son and not opus) or (opus and not son):
+            fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
+    return fields
 
 def _rel_time(ts_str: str | None) -> str:
     if not ts_str: return "—"
@@ -129,11 +170,8 @@ def render_embed(state: dict) -> dict:
     active_n = sum(1 for a in agents if a.get("status") != "stopped")
     stopped_n = sum(1 for a in agents if a.get("status") == "stopped")
 
-    # ── Description: usage line + headline counts ──
+    # Description = capacity + paused badge only; usage gets its own fields
     desc_lines = []
-    usage_line = fetch_usage_summary()
-    if usage_line:
-        desc_lines.append(usage_line)
     capacity = f"`{active_n}/{cap}` active agents"
     if stopped_n: capacity += f" · `{stopped_n}` stopped"
     desc_lines.append(capacity)
@@ -178,10 +216,18 @@ def render_embed(state: dict) -> dict:
 
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
 
+    fields = _usage_fields(fetch_usage_data())
+    fields.append({
+        "name": "Agents",
+        "value": table_block,
+        "inline": False,
+    })
+
     embed = {
         "title": f"c3r · {state['project']}",
         "color": _health_color(state),
-        "description": "\n".join(desc_lines) + "\n" + table_block,
+        "description": "\n".join(desc_lines),
+        "fields": fields,
         "footer": {
             "text": f"updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ·  auto-refresh 60s"
         },
