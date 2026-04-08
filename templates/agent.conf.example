@@ -7,5 +7,10 @@ AGENT_MODEL="claude-sonnet-4-6"        # claude-sonnet-4-6 | claude-opus-4-6 | c
 ITERATION_COOLDOWN_SEC=20               # delay between iterations
 MAX_CONSECUTIVE_FAILURES=5              # circuit breaker
 CONTEXT_ALERT_THRESHOLDS="25 50 75 100" # % of 200k window
+# Per-iteration wall-clock cap in seconds. Empty = no timeout (default).
+# Training-in-the-loop projects should leave this empty. Set to e.g. 14400
+# (4h) only if your iterations have predictable bounded durations and you
+# want a hard safety net.
+ITERATION_TIMEOUT_SEC=""
 # Discord thread for this agent (set by c3r init after thread creation)
 C3R_AGENT_THREAD_ID=""

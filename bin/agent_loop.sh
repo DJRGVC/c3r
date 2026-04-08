@@ -40,7 +40,11 @@ ENV_FILE="$C3R_WORKTREE/.c3r/env.sh"
 AGENT_MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 ITERATION_COOLDOWN_SEC="${ITERATION_COOLDOWN_SEC:-20}"
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
-ITERATION_TIMEOUT_SEC="${ITERATION_TIMEOUT_SEC:-3600}"  # 1h hard cap per iter
+# Optional per-iteration wall-clock cap. Empty/unset = no timeout (default).
+# Training-in-the-loop projects should leave this unset so long GPU runs
+# aren't killed mid-train. Set in agent.conf to e.g. 14400 (4h) only if you
+# have hard predictable iteration lengths and want a safety net.
+ITERATION_TIMEOUT_SEC="${ITERATION_TIMEOUT_SEC:-}"
 CONTEXT_WINDOW=200000  # Claude 4.6 default
 
 fail_streak=0

@@ -158,9 +158,11 @@ and the next iteration picks it up.
    `c3r/<project>` → `agent/<name>` and commit only there. You merge back
    manually on your review schedule.
 3. **GPU lock** — `gpu_lock.sh` uses `flock` so two agents can't OOM the GPU.
-4. **Iteration timeout** — each `claude -p` call is wrapped in `timeout
-   $ITERATION_TIMEOUT_SEC` (default 1 hour) so a stuck iteration can't hang
-   the loop forever.
+4. **Iteration timeout (optional, off by default)** — `ITERATION_TIMEOUT_SEC`
+   in `agent.conf` can wrap each `claude -p` call in `timeout`. Empty by
+   default because long training runs (>1h) are common; circuit breaker +
+   manual pause handle the hang case instead. Set to e.g. `14400` (4h) if
+   your project has predictable bounded iter lengths.
 5. **Circuit breaker** — 5 consecutive failures auto-pause the agent and
    @mention you in Discord.
 6. **max_agents cap** — global, asked at init. `c3r spawn` refuses with a
