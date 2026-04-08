@@ -247,24 +247,26 @@ def render_embed(state: dict) -> dict:
             f"{bar_c}{bar}{ANSI_RESET}  "
             f"{ctx:>3}%"
         )
-        # Indented under the agent name (5-space indent) and kept SHORT so
-        # they always fit on one line in Discord's narrow code-block viewport.
-        badge_indent = "     "
+        # Indented 8 spaces so badges visibly nest under the agent name.
+        # Discord's narrow code-block viewport has ~50 chars of usable width
+        # at this indent — plenty for our short messages.
+        badge_indent = "        "
         badges = []
         if a.get("fail_streak", 0) >= 3:
             badges.append(f"fails={a['fail_streak']}")
-        if ctx >= 75 and st != "stopped":
-            badges.append("ctx full")
+        if ctx >= 90 and st != "stopped":
+            badges.append("context full")
+        elif ctx >= 75 and st != "stopped":
+            badges.append("context high")
         if a.get("status") == "error":
             badges.append("last iter failed")
         if badges:
             block_lines.append(f"{badge_indent}{ANSI_RED}⚠ {' · '.join(badges)}{ANSI_RESET}")
-        # Cooperative pause: if project is paused but iter is still running,
-        # show a one-line badge ("pause after iter #N") so the user can see
-        # the agent is winding down naturally.
+        # Cooperative pause: project is paused but this agent's iter is still
+        # running. Surface that the agent is winding down naturally.
         if state.get("paused") and st == "running":
             block_lines.append(
-                f"{badge_indent}{ANSI_YELLO}⏸ pause after iter {iter_n}{ANSI_RESET}"
+                f"{badge_indent}{ANSI_YELLO}⏸ pausing after iter {iter_n}{ANSI_RESET}"
             )
         for c in children.get(name, []):
             row(c, depth + 1)
