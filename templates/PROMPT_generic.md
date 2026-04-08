@@ -77,6 +77,44 @@ context window. The files on disk are your only persistent memory.
    is not hard-gated but the same rule applies — never `cd` out, never use
    absolute paths pointing above the worktree, and never `cp`/`mv` files out.
    If you genuinely need to write outside (unlikely), ask the human first.
+
+6. **Iteration wall-clock cap: 90 MINUTES.** Each `claude -p` invocation
+   (i.e. this whole prompt + everything you do in it, including any Bash
+   tool calls) is hard-killed at 5400 seconds. This has major implications
+   for long training runs:
+
+   - **Never launch a training run longer than ~80 minutes.** Leave ~10 min
+     for parsing metrics, writing the log entry, and committing.
+   - **Checkpoint frequently during training** — every 5–10 minutes at
+     most. If your iteration is killed mid-train, the next iteration needs
+     to resume from the latest checkpoint, not start from scratch.
+   - **At the end of every iteration, record in RESEARCH_LOG.md**: the
+     checkpoint path, the current step/epoch, and the last metric value.
+     This is how the next iteration knows what to resume.
+   - **Next iteration's first step after reading the log**: if the previous
+     entry was a partial training run, resume from the recorded checkpoint
+     rather than starting a new run from scratch.
+   - For short-running training (<80 min total), you can run the whole
+     thing in one iteration. For longer training, split across iterations.
+   - If your project's iterations genuinely need >90 min (e.g. a single
+     training epoch takes 2 hours), ask the human to raise
+     `ITERATION_TIMEOUT_SEC` in your `.c3r/agent.conf` via `ask_human.py`.
+
+7. **Reading Weights & Biases.** If the project uses wandb, you can read
+   metrics from runs (including currently-running ones) via the Python API:
+   ```python
+   import wandb
+   api = wandb.Api()
+   runs = api.runs("entity/project")
+   for run in runs:
+       print(run.name, run.state, run.summary.get("eval/mean_reward"))
+   ```
+   Use this to check training progress from a previous iteration without
+   re-running the training, or to compare multiple recent experiments.
+   `WANDB_API_KEY` is expected to be set in `.c3r/env.sh` or via
+   `~/.netrc` (after running `wandb login` once outside c3r). If it isn't
+   and you need wandb, ask the human to set it via `ask_human.py`.
+
 8. **Stay on your branch.** You are on `agent/{{AGENT_NAME}}`. Sibling agents:
    {{SIBLINGS}}. If you need a change in a sibling's scope, write a note to
    `NEEDS_{{SIBLING_UPPER}}.md` and keep moving. Never touch another agent's files.
