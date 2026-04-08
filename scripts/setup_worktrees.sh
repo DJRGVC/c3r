@@ -10,6 +10,12 @@ shift
 cd "$REPO"
 git rev-parse --is-inside-work-tree >/dev/null
 
+if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "[setup] error: repo has no commits yet — make at least one commit before running c3r init" >&2
+    echo "[setup]   quick fix: git -c commit.gpgsign=false commit --allow-empty -m init" >&2
+    exit 1
+fi
+
 BASE="$(git symbolic-ref --short HEAD)"
 PARENT="$(dirname "$REPO")"
 REPO_NAME="$(basename "$REPO")"
