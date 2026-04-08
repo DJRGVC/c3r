@@ -80,15 +80,40 @@ compounding research process.
 
 ## Quick start
 
+**One-line install** (Linux + macOS — Windows: use [WSL2](#windows)):
+
 ```bash
-git clone https://github.com/DJRGVC/c3r ~/Research/c3r
-~/Research/c3r/c3r install                        # symlink into ~/.local/bin
-c3r init ~/Research/YourProject                    # interactive wizard
-c3r launch ~/Research/YourProject
-c3r watch ~/Research/YourProject
+curl -fsSL https://raw.githubusercontent.com/DJRGVC/c3r/main/install.sh | bash
+```
+
+This clones c3r to `~/.local/share/c3r`, symlinks the CLI into `~/.local/bin/c3r`,
+verifies dependencies, and prints next steps. No sudo, nothing outside `$HOME`,
+no telemetry.
+
+Then:
+
+```bash
+c3r doctor                                  # verify install + dependencies
+c3r setup ~/Research/YourProject            # interactive Discord-bot + agent wizard
+c3r launch ~/Research/YourProject           # spin up the tmux session
+c3r watch  ~/Research/YourProject           # live dashboard
 ```
 
 See [SETUP.md](SETUP.md) for the full walkthrough.
+
+### Windows
+
+c3r is bash + tmux + flock + setsid + python — POSIX-only. **Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)**: install Ubuntu in WSL2,
+open a WSL terminal, and run the curl installer above. Everything works
+identically because WSL2 is a real Linux environment. There is no native
+Windows port and there's no plan for one — WSL2 covers the use case.
+
+### Manual install (alternative to curl)
+
+```bash
+git clone https://github.com/DJRGVC/c3r ~/Research/c3r
+~/Research/c3r/c3r install                  # symlink into ~/.local/bin
+```
 
 ## CLI
 

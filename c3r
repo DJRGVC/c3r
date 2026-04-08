@@ -102,7 +102,8 @@ ${BOLD}USAGE${RESET}
 
 ${BOLD}SETUP${RESET}
   install                 symlink c3r into ~/.local/bin
-  init [path]             interactive project setup wizard
+  init [path]             interactive project setup wizard (alias: setup)
+  setup [path]            same as init — friendlier name for first-timers
   doctor                  verify env, Discord bot, tools
   config                  show the saved config file
 
@@ -2055,7 +2056,7 @@ cmd_listen() {
 load_config
 cmd="${1:-help}"; shift || true
 case "$cmd" in
-    init)      cmd_init      "$@" ;;
+    init|setup) cmd_init     "$@" ;;
     launch)    cmd_launch    "$@" ;;
     attach|a)  cmd_attach    "$@" ;;
     watch|w)   cmd_watch     "$@" ;;
