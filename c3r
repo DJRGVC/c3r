@@ -749,7 +749,10 @@ PY
                 echo "# (no project-specific env needed; edit if something changes)"
             fi
         } > "$wt/.c3r/env.sh"
-        ok "seeded $wt/.c3r/ ($role)"
+        # Sandbox hook — rejects Write/Edit/NotebookEdit outside the worktree
+        mkdir -p "$wt/.claude"
+        cp "$C3R_DIR/templates/claude_settings.json" "$wt/.claude/settings.json"
+        ok "seeded $wt/.c3r/ + .claude/ ($role)"
     done
 
     # Symlink scripts/c3r → $C3R_BIN
@@ -1215,6 +1218,9 @@ for a in s['agents']:
     cp "$C3R_DIR/templates/INBOX.md"        "$wt/.c3r/INBOX.md"
     printf '# INBOX ARCHIVE\n' > "$wt/.c3r/INBOX_ARCHIVE.md"
     write_agent_conf "$wt" "$name" "$role" "$model"
+    # Sandbox hook
+    mkdir -p "$wt/.claude"
+    cp "$C3R_DIR/templates/claude_settings.json" "$wt/.claude/settings.json"
 
     # Create Discord thread
     python3 - "$state" "$name" "$role" "$model" "$focus" "$wt" "$parent" <<'PY'
