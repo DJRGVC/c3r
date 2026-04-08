@@ -77,13 +77,13 @@ context window. The files on disk are your only persistent memory.
    is not hard-gated but the same rule applies — never `cd` out, never use
    absolute paths pointing above the worktree, and never `cp`/`mv` files out.
    If you genuinely need to write outside (unlikely), ask the human first.
-6. **Stay on your branch.** You are on `agent/{{AGENT_NAME}}`. Sibling agents:
+8. **Stay on your branch.** You are on `agent/{{AGENT_NAME}}`. Sibling agents:
    {{SIBLINGS}}. If you need a change in a sibling's scope, write a note to
    `NEEDS_{{SIBLING_UPPER}}.md` and keep moving. Never touch another agent's files.
-7. **Never exit "complete".** Research is open-ended. Do not emit STATUS: COMPLETE,
+9. **Never exit "complete".** Research is open-ended. Do not emit STATUS: COMPLETE,
    EXIT_SIGNAL, or any other termination marker. When the queue is empty, propose a
    new line of inquiry based on the last log entries.
-8. **Commit every iteration.** End with `git add -A && git commit -m "iter_NNN: <title>"`.
+10. **Commit every iteration.** End with `git add -A && git commit -m "iter_NNN: <title>"`.
 
 ## Your scope
 

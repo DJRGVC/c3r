@@ -578,9 +578,9 @@ AGENT_MODEL="$model"
 ITERATION_COOLDOWN_SEC=20
 MAX_CONSECUTIVE_FAILURES=5
 CONTEXT_ALERT_THRESHOLDS="25 50 75 100"
-# Per-iteration wall-clock cap in seconds. Empty = no timeout (default).
-# Leave empty for projects with long training runs.
-ITERATION_TIMEOUT_SEC=""
+# Per-iteration wall-clock cap in seconds. Default 5400 (90 min).
+# Empty string disables the cap if iterations may exceed 90 min.
+ITERATION_TIMEOUT_SEC=5400
 C3R_AGENT_THREAD_ID="$thread"
 EOF
 }
@@ -675,6 +675,11 @@ EOF
     source ~/miniconda3/bin/activate myenv
     source .venv/bin/activate && export CUDA_VISIBLE_DEVICES=0
     nvm use 20 && export NODE_ENV=development
+
+  You can chain multiple commands with &&. If you use Weights & Biases,
+  ensure WANDB_API_KEY is set (either exported here or via ~/.netrc after
+  running `wandb login` once outside c3r). Example:
+    source /path/to/venv/bin/activate && export WANDB_API_KEY=xxxxxxxx
 
   Leave blank if nothing is needed.
 EOF
