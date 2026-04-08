@@ -488,15 +488,24 @@ wizard_discord_creds() {
 Steps (one-time, ~5 minutes):
   1. https://discord.com/developers/applications → New Application → Bot
   2. Copy the bot token
-  3. OAuth2 → URL Generator → scopes: bot
-     permissions: View Channel, Send Messages, Create Public Threads,
-                  Send Messages in Threads, Read Message History, Add Reactions
-  4. Open the generated URL → invite the bot to your server
-  5. In Discord: Settings → Advanced → Developer Mode ON
-  6. CREATE A DEDICATED CHANNEL for this project (e.g. #c3r-myproject)
+  3. Still on the Bot page → Privileged Gateway Intents →
+     enable MESSAGE CONTENT INTENT → Save Changes
+     (without this, your thread replies arrive with empty content)
+  4. OAuth2 → URL Generator → scopes: bot
+     permissions:
+       - View Channel
+       - Send Messages
+       - Create Public Threads
+       - Send Messages in Threads
+       - Read Message History
+       - Add Reactions
+       - Manage Threads           (lets c3r delete sub-agent threads on kill)
+  5. Open the generated URL → invite the bot to your server
+  6. In Discord: Settings → Advanced → Developer Mode ON
+  7. CREATE A DEDICATED CHANNEL for this project (e.g. #c3r-myproject)
      and ONLY grant the bot access to that channel
-  7. Right-click the channel → Copy Channel ID
-  8. Right-click your own name → Copy User ID
+  8. Right-click the channel → Copy Channel ID
+  9. Right-click your own name → Copy User ID
 
 EOF
     load_config
@@ -618,6 +627,40 @@ EOF
     local max_agents; max_agents=$(ask "Max parallel agents cap [4]: " "4")
     [[ "$max_agents" =~ ^[1-9][0-9]*$ ]] || die "max_agents must be a positive integer"
 
+    echo
+    info "Base branch (isolation from main)"
+    cat <<EOF
+  c3r agents never commit directly to your main branch. They each get their
+  own agent/<name> branch. By default those fork off a dedicated base branch
+  (recommended) so the entire c3r project lives as one subtree you can
+  review and merge back manually.
+EOF
+    local default_base="c3r/$project_name"
+    local base_branch; base_branch=$(ask "Base branch to fork agents off [$default_base]: " "$default_base")
+    # Create it off HEAD if it doesn't exist
+    ( cd "$target" && \
+      if git show-ref --verify --quiet "refs/heads/$base_branch"; then
+          echo "[init] base branch '$base_branch' already exists; reusing"
+      else
+          git branch "$base_branch" HEAD && echo "[init] created base branch '$base_branch' off HEAD"
+      fi )
+
+    echo
+    info "Project environment activation (optional)"
+    cat <<'EOF'
+  If this project needs a venv or env vars activated before the agent can
+  run (e.g. Isaac Lab, conda, cargo, node nvm), enter the exact bash command
+  that activates it. It gets sourced at the start of every iteration.
+
+  Examples:
+    source /home/daniel-grant/IsaacLab/.venv311/bin/activate
+    source ~/miniconda3/bin/activate myenv
+    source .venv/bin/activate && export CUDA_VISIBLE_DEVICES=0
+
+  Leave blank if nothing is needed.
+EOF
+    local project_env; project_env=$(ask "Activation command (or empty): " "")
+
     # Discord creds
     echo
     load_config
@@ -632,9 +675,9 @@ EOF
     local do_smoke; do_smoke=$(ask "Run Discord smoke test? [Y/n]: " "Y")
     [[ ! "$do_smoke" =~ ^[Nn] ]] && wizard_smoke
 
-    # Worktrees
+    # Worktrees (forked off the dedicated base branch)
     info "creating git worktrees..."
-    "$C3R_DIR/scripts/setup_worktrees.sh" "$target" "${AG_NAMES[@]}"
+    "$C3R_DIR/scripts/setup_worktrees.sh" "$target" --base "$base_branch" "${AG_NAMES[@]}"
 
     # state.json — pass names/roles/models/foci via env (foci may contain spaces)
     mkdir -p "$target/.c3r"
@@ -694,6 +737,16 @@ PY
         [ -f "$wt/.c3r/RESEARCH_LOG.md" ] || cp "$C3R_DIR/templates/RESEARCH_LOG.md" "$wt/.c3r/RESEARCH_LOG.md"
         [ -f "$wt/.c3r/INBOX.md" ]        || cp "$C3R_DIR/templates/INBOX.md"        "$wt/.c3r/INBOX.md"
         write_agent_conf "$wt" "$name" "$role" "$model"
+        # Project env activation script — sourced by agent_loop.sh each iteration
+        {
+            echo "# Sourced by agent_loop.sh at the start of each iteration."
+            echo "# Add any env vars, venv activations, or CUDA settings this project needs."
+            if [ -n "$project_env" ]; then
+                echo "$project_env"
+            else
+                echo "# (no project-specific env needed; edit if something changes)"
+            fi
+        } > "$wt/.c3r/env.sh"
         ok "seeded $wt/.c3r/ ($role)"
     done
 
@@ -1115,15 +1168,39 @@ PY
     local rc=$?
     [ "$rc" -ne 0 ] && return $rc
 
-    # Create worktree
+    # Create worktree — fork off the project's c3r base branch if one exists,
+    # otherwise fork off the parent agent's branch, otherwise HEAD.
     local parent_dir; parent_dir="$(dirname "$target")"
     local repo_name; repo_name="$(basename "$target")"
     local wt="$parent_dir/${repo_name}-${name}"
     local branch="agent/$name"
+    local proj_name; proj_name="$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+    local fork_from="c3r/$proj_name"
     ( cd "$target" && {
-        git show-ref --verify --quiet "refs/heads/$branch" || git branch "$branch" HEAD
+        if ! git show-ref --verify --quiet "refs/heads/$fork_from"; then
+            fork_from="HEAD"
+        fi
+        git show-ref --verify --quiet "refs/heads/$branch" || git branch "$branch" "$fork_from"
         git worktree add "$wt" "$branch" 2>/dev/null || git worktree add --force "$wt" "$branch"
     } ) || die "worktree creation failed"
+
+    # Inherit env.sh from project root or parent agent's worktree if available
+    mkdir -p "$wt/.c3r"
+    if [ -n "$parent" ]; then
+        local parent_wt; parent_wt="$(python3 -c "import json;s=json.load(open('$state'));print(next((a['worktree'] for a in s['agents'] if a['name']=='$parent'),''))")"
+        [ -f "$parent_wt/.c3r/env.sh" ] && cp "$parent_wt/.c3r/env.sh" "$wt/.c3r/env.sh"
+    fi
+    # Fall back to any sibling's env.sh if no parent
+    if [ ! -f "$wt/.c3r/env.sh" ]; then
+        local any_env; any_env="$(python3 -c "
+import json, os
+s = json.load(open('$state'))
+for a in s['agents']:
+    p = os.path.join(a['worktree'], '.c3r/env.sh')
+    if os.path.exists(p): print(p); break
+")"
+        [ -n "$any_env" ] && cp "$any_env" "$wt/.c3r/env.sh"
+    fi
 
     # Seed .c3r/
     mkdir -p "$wt/.c3r"

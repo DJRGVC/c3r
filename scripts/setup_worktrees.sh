@@ -3,8 +3,12 @@
 # Usage: setup_worktrees.sh <target-repo> <agent-name> [agent-name ...]
 set -euo pipefail
 
-REPO="${1:?Usage: setup_worktrees.sh <target-repo> <agent-name> [agent-name ...]}"
+REPO="${1:?Usage: setup_worktrees.sh <target-repo> [--base <branch>] <agent-name> [agent-name ...]}"
 shift
+BASE_OVERRIDE=""
+if [ "${1:-}" = "--base" ]; then
+    BASE_OVERRIDE="$2"; shift 2
+fi
 [ "$#" -ge 1 ] || { echo "need at least one agent name" >&2; exit 1; }
 
 cd "$REPO"
@@ -16,7 +20,15 @@ if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
     exit 1
 fi
 
-BASE="$(git symbolic-ref --short HEAD)"
+if [ -n "$BASE_OVERRIDE" ]; then
+    git show-ref --verify --quiet "refs/heads/$BASE_OVERRIDE" || {
+        echo "[setup] base branch '$BASE_OVERRIDE' does not exist; create it first" >&2; exit 1;
+    }
+    BASE="$BASE_OVERRIDE"
+else
+    BASE="$(git symbolic-ref --short HEAD)"
+fi
+echo "[setup] basing agent branches off: $BASE"
 PARENT="$(dirname "$REPO")"
 REPO_NAME="$(basename "$REPO")"
 

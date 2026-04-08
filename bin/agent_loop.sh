@@ -29,8 +29,13 @@ cd "$C3R_WORKTREE"
 CONF="$C3R_WORKTREE/.c3r/agent.conf"
 PAUSE_FLAG="$C3R_WORKTREE/.c3r/PAUSED"
 PROMPT="$C3R_WORKTREE/.c3r/PROMPT.md"
+ENV_FILE="$C3R_WORKTREE/.c3r/env.sh"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
+# Project-specific environment activation (venvs, CUDA, conda, etc).
+# Sourced BEFORE the agent.conf so agent.conf can override if needed.
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 AGENT_MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 ITERATION_COOLDOWN_SEC="${ITERATION_COOLDOWN_SEC:-20}"
