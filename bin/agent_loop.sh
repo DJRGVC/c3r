@@ -168,12 +168,12 @@ print(min(round(total * 100 / window) if window else 0, 100))
         hb --status idle --inc-iter --context-pct "$pct"
         fail_streak=0
 
-        # Auto-trigger compaction at high context. The PROMPT already
-        # instructs the agent to self-compact at >50%, but agents don't
-        # always follow that — and at 100% the iter may overflow before
-        # reaching the compaction logic. Force the issue by injecting a
-        # high-priority directive into INBOX so the next iter sees it
-        # FIRST and acts on it before doing anything else.
+        # Auto-trigger compaction at high context by injecting a directive
+        # into INBOX. The agent reads INBOX at the top of every iter and
+        # acts on the directive before any other work. Idempotent: skips
+        # if a directive is already pending. NO Discord notification here
+        # — heartbeat.py already fires the user-facing alert at the same
+        # threshold and we don't want double-pings.
         if [ "$pct" -ge 75 ] 2>/dev/null && ! grep -q "AUTO-COMPACT REQUIRED" "$C3R_WORKTREE/.c3r/INBOX.md" 2>/dev/null; then
             python3 - "$C3R_WORKTREE/.c3r/INBOX.md" "$pct" "$C3R_AGENT_NAME" <<'PY'
 import sys, pathlib
@@ -188,8 +188,6 @@ with inbox.open("a") as f:
     f.write(f"\n---\n[{ts}] system → {agent}\nMSG: 🚨 AUTO-COMPACT REQUIRED — your last iteration's context was at {pct}%. Your NEXT iteration MUST be a dedicated compaction iteration per PROMPT rule 6: read RESEARCH_LOG.md, summarize old entries into a Compacted Summary block, move verbatim entries to RESEARCH_LOG_ARCHIVE.md, prune fix_plan.md, commit. Do NOT do anything else this iteration. After compaction, normal work resumes the iteration after.\n")
 print(f"[agent_loop] injected auto-compact directive into {inbox_path}", file=sys.stderr)
 PY
-            "$C3R_BIN/notify.py" --thread "${C3R_AGENT_THREAD_ID:-}" --mention \
-                "🚨 **$C3R_AGENT_NAME** context at ${pct}% — auto-compaction queued for next iteration" 2>/dev/null || true
         fi
     else
         echo "[agent_loop] claude call failed on iter $iter_id" >&2

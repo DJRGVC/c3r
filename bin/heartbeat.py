@@ -60,23 +60,36 @@ def main() -> int:
     # Redraw the board
     subprocess.run([sys.executable, f"{C3R_BIN}/status_board.py", "update", "--state", args.state], check=False)
 
-    # Threshold alerts — fire ONCE per heartbeat at the HIGHEST threshold
-    # crossed, not once per threshold. Otherwise a 0→100% jump (which is
-    # what you get when the cache-aware fix lands and pre-existing logs
-    # suddenly start being counted) sends 4 notifications back-to-back.
+    # Threshold alerts — fire AT MOST ONCE per "ascent" through the
+    # threshold ladder. Track last_alert_threshold in state.json so:
+    #   - 0 → 100% jump fires ONE alert at 100%, not four
+    #   - subsequent iters at 80%, 90%, 95% fire NOTHING (already alerted)
+    #   - if ctx drops back below 25%, the alert state resets so a future
+    #     climb can fire again
     if args.context_pct is not None and agent.get("thread_id"):
-        crossed = [t for t in (25, 50, 75, 100) if prev_pct < t <= args.context_pct]
-        if crossed:
-            t = max(crossed)
-            user = os.environ.get("DISCORD_USER_ID", "")
-            mention = f"<@{user}> " if user and t >= 75 else ""
-            icon = "🟢" if t == 25 else "🟡" if t == 50 else "🟠" if t == 75 else "🔴"
-            msg = f"{mention}{icon} **{args.agent}** context at **{args.context_pct}%** — "
-            if t >= 75:
-                msg += "consider pruning RESEARCH_LOG.md or tightening scope before next iter."
-            else:
-                msg += "heads up."
-            subprocess.run([f"{C3R_BIN}/notify.py", "--thread", agent["thread_id"], msg], check=False)
+        cur = args.context_pct
+        last_alert = agent.get("last_alert_threshold", 0)
+        # Reset the alert state when ctx drops below the lowest threshold
+        if cur < 25:
+            agent["last_alert_threshold"] = 0
+            save(args.state, state)
+        else:
+            # Highest threshold the current pct is at or above, that we
+            # haven't already alerted for
+            crossed = [t for t in (25, 50, 75, 100) if cur >= t and t > last_alert]
+            if crossed:
+                t = max(crossed)
+                user = os.environ.get("DISCORD_USER_ID", "")
+                mention = f"<@{user}> " if user and t >= 75 else ""
+                icon = "🟢" if t == 25 else "🟡" if t == 50 else "🟠" if t == 75 else "🔴"
+                msg = f"{mention}{icon} **{args.agent}** context at **{cur}%** — "
+                if t >= 75:
+                    msg += "consider pruning RESEARCH_LOG.md or tightening scope before next iter."
+                else:
+                    msg += "heads up."
+                subprocess.run([f"{C3R_BIN}/notify.py", "--thread", agent["thread_id"], msg], check=False)
+                agent["last_alert_threshold"] = t
+                save(args.state, state)
 
     # Fail streak alert
     if args.fail and agent.get("fail_streak", 0) >= 3 and agent.get("thread_id"):
