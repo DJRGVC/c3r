@@ -2100,6 +2100,57 @@ PY
         ok "wrote .github/workflows/quarto-publish.yml"
     fi
 
+    # Auto-enable GitHub Pages via gh API so the user never has to touch
+    # the repo settings UI. Uses build_type=workflow (modern deploy-pages
+    # flow — no gh-pages branch needed). Requires gh CLI authenticated
+    # AND admin permission on the repo. Both should be true if you ran
+    # `gh auth login` once.
+    local site_url=""
+    if command -v gh >/dev/null 2>&1; then
+        local repo_path
+        repo_path=$(git -C "$target" config --get remote.origin.url 2>/dev/null \
+            | sed -E 's|^git@github\.com:|https://github.com/|' \
+            | sed -E 's|^https://github\.com/||' \
+            | sed -E 's|\.git$||')
+        if [ -n "$repo_path" ]; then
+            info "enabling GitHub Pages via gh API (build_type=workflow)"
+            local pages_resp
+            if pages_resp=$(gh api "repos/$repo_path/pages" --method POST \
+                -f build_type=workflow 2>&1); then
+                # Newly enabled
+                site_url=$(echo "$pages_resp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('html_url',''))" 2>/dev/null || true)
+                ok "GitHub Pages enabled — will be live at: $site_url"
+            elif gh api "repos/$repo_path/pages" 2>&1 | grep -q '"html_url"'; then
+                # Already enabled — fetch existing URL
+                site_url=$(gh api "repos/$repo_path/pages" 2>&1 | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('html_url',''))" 2>/dev/null || true)
+                # Make sure it's set to workflow (not gh-pages branch)
+                gh api "repos/$repo_path/pages" --method PUT -f build_type=workflow >/dev/null 2>&1 || true
+                ok "GitHub Pages already enabled at: $site_url"
+            else
+                warn "could not enable GitHub Pages via gh API"
+                warn "  ensure you're authenticated: gh auth status"
+                warn "  the workflow will still run on push, but you may need to enable Pages manually:"
+                warn "    Repo → Settings → Pages → Source: GitHub Actions"
+            fi
+            # Persist the URL to state.json so other commands can show it
+            if [ -n "$site_url" ] && [ -f "$target/.c3r/state.json" ]; then
+                python3 - "$target/.c3r/state.json" "$site_url" <<'PY'
+import json, sys
+sp, url = sys.argv[1:]
+s = json.load(open(sp))
+s["quarto_site_url"] = url
+s["quarto_enabled"] = True
+json.dump(s, open(sp, "w"), indent=2)
+PY
+            fi
+        else
+            warn "could not parse remote.origin.url; skipping Pages auto-enable"
+        fi
+    else
+        warn "gh CLI not found — install from https://cli.github.com/"
+        warn "  the workflow will still run on push, but you'll need to enable Pages manually"
+    fi
+
     # .gitignore additions
     if [ -f "$target/.gitignore" ]; then
         if ! grep -q "^_site/" "$target/.gitignore"; then
@@ -2123,25 +2174,27 @@ EOF
     cat <<EOF
 
 ${GREEN}${BOLD}Quarto site scaffolded.${RESET}
+${site_url:+${BOLD}Live at:${RESET} $site_url ${DIM}(after first push to main)${RESET}}
 
 ${BOLD}Next steps:${RESET}
-  1. ${DIM}# Install Quarto CLI if you haven't already${RESET}
+  1. ${DIM}# Install Quarto CLI locally if you want to preview before pushing${RESET}
      https://quarto.org/docs/get-started/
 
   2. ${DIM}# Edit index.qmd to add your project headline${RESET}
      \$EDITOR $target/index.qmd
 
-  3. ${DIM}# Preview locally (auto-reloads as you edit)${RESET}
+  3. ${DIM}# (optional) preview locally with auto-reload${RESET}
      c3r report serve $target
 
   4. ${DIM}# Commit + push${RESET}
-     cd $target && git add _quarto.yml index.qmd agents/ experiments/ references.qmd styles.css .github/ .gitignore
+     cd $target
+     git add _quarto.yml index.qmd agents/ experiments/ images/ videos/ references.qmd styles.css .github/ .gitignore
      git commit -m "Add Quarto report site"
      git push
 
-  5. ${DIM}# Enable GitHub Pages in repo settings → Pages → source = gh-pages branch${RESET}
-     The first push to main triggers the GitHub Action which auto-deploys.
-     Site will appear at: https://<your-user>.github.io/$(basename "$target")/
+  ${DIM}# That's it. The push triggers the GitHub Action which builds${RESET}
+  ${DIM}# Quarto and deploys to GitHub Pages automatically. ~60s end-to-end.${RESET}
+  ${DIM}# No repo settings to touch.${RESET}
 
 Agents will automatically maintain agents/<name>.qmd files as part of
 their normal iteration commits once the next \`c3r upgrade\` runs.
@@ -2224,7 +2277,22 @@ cmd_report_status() {
     if command -v quarto >/dev/null; then
         ok "quarto CLI: $(quarto --version 2>&1 | head -1)"
     else
-        warn "quarto CLI not installed"
+        warn "quarto CLI not installed (only needed for local preview)"
+    fi
+    # Site URL (from state.json if a c3r project, else derive from remote)
+    local site_url=""
+    if [ -f "$target/.c3r/state.json" ]; then
+        site_url=$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json')).get('quarto_site_url',''))" 2>/dev/null)
+    fi
+    if [ -z "$site_url" ] && command -v gh >/dev/null; then
+        local repo_path
+        repo_path=$(git -C "$target" config --get remote.origin.url 2>/dev/null \
+            | sed -E 's|^git@github\.com:|https://github.com/|; s|^https://github\.com/||; s|\.git$||')
+        site_url=$(gh api "repos/$repo_path/pages" 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('html_url',''))" 2>/dev/null || true)
+    fi
+    if [ -n "$site_url" ]; then
+        echo
+        ok "${BOLD}live site:${RESET} $site_url"
     fi
 }
 

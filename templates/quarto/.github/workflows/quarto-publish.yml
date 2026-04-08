@@ -7,13 +7,21 @@ on:
       - 'c3r/**'
   workflow_dispatch:
 
+# Modern deploy-pages flow — no gh-pages branch, no manual repo settings.
+# `c3r report init` enables this build type via the gh API at scaffold
+# time, so the user never has to touch the GitHub UI.
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
+# Don't queue more than one deploy at a time
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  build-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,12 +32,21 @@ jobs:
       - name: Set up Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
-      - name: Render site
-        uses: quarto-dev/quarto-actions/render@v2
+      - name: Render Quarto site
+        run: quarto render
 
-      - name: Publish to gh-pages
-        uses: quarto-dev/quarto-actions/publish@v2
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          target: gh-pages
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
