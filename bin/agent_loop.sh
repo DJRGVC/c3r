@@ -78,6 +78,25 @@ while :; do
         sleep 60
     done
 
+    # --- re-sync C3R_AGENT_THREAD_ID from state.json. State.json is the
+    # canonical source — agent.conf's cached thread_id can go stale if a
+    # thread was deleted/recreated after spawn. Without this resync,
+    # ask_human.py and notify.py would silently 404 forever.
+    if [ -f "$C3R_STATE" ]; then
+        fresh_thread=$(python3 -c "
+import json
+s = json.load(open('$C3R_STATE'))
+for a in s['agents']:
+    if a['name'] == '$C3R_AGENT_NAME':
+        print(a.get('thread_id') or '')
+        break
+" 2>/dev/null)
+        if [ -n "$fresh_thread" ] && [ "$fresh_thread" != "${C3R_AGENT_THREAD_ID:-}" ]; then
+            echo "[agent_loop] thread_id resync: ${C3R_AGENT_THREAD_ID:-(empty)} → $fresh_thread" >&2
+            export C3R_AGENT_THREAD_ID="$fresh_thread"
+        fi
+    fi
+
     # --- refresh the SIBLINGS.md snapshot so the agent has fresh cross-branch
     # visibility at the top of every iteration
     "$C3R_BIN/siblings_snapshot.py" "$C3R_STATE" "$C3R_AGENT_NAME" 2>/dev/null || true
