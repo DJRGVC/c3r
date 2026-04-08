@@ -1027,8 +1027,10 @@ paused = " " + (YELLOW + "[PAUSED]" + RESET if s.get("paused") else GREEN + "[ru
 print(f"{BOLD}c3r · {s['project']}{RESET}{paused}   {DIM}gpu_lock={s.get('gpu_lock','?')}  refresh={os.environ['C3R_INTERVAL']}s  q=quit{RESET}")
 print(bar)
 cap = s.get("max_agents", "?")
+active_n = sum(1 for a in s["agents"] if a.get("status") != "stopped")
+stopped_n = sum(1 for a in s["agents"] if a.get("status") == "stopped")
 total = len(s["agents"])
-print(f"{BOLD}agents:{RESET} {total}/{cap}")
+print(f"{BOLD}agents:{RESET} {active_n}/{cap} active" + (f"  {DIM}({stopped_n} stopped){RESET}" if stopped_n else ""))
 hdr = f"{BOLD}{'':2}{'AGENT':<18}{'STATUS':<9}{'MODEL':<10}{'ITER':<7}{'CTX%':>5}  {'LAST':<12}{'FAIL':>5}{RESET}"
 print(hdr)
 
@@ -1273,34 +1275,49 @@ cmd_spawn() {
     if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
     local state; state="$(require_state "$target")"
 
-    local name="${1:?usage: c3r spawn NAME ROLE \"FOCUS\" [--model M]}"; shift
+    local name="${1:?usage: c3r spawn NAME ROLE \"FOCUS\" [--model M] [--max-iters N]}"; shift
     local role="${1:?role required}"; shift
     local focus="${1:?focus required}"; shift
     local model="claude-sonnet-4-6"
     local parent_override=""
+    local max_iters=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --model) model="$2"; shift 2 ;;
             --parent) parent_override="$2"; shift 2 ;;
+            --max-iters) max_iters="$2"; shift 2 ;;
             *) die "unknown flag: $1" ;;
         esac
     done
+    # Default sub-agents to a 20-iter budget so they self-kill if their parent
+    # forgets them. Top-level (CLI-spawned with no parent) defaults to unlimited.
+    if [ -z "$max_iters" ]; then
+        if [ -n "${C3R_AGENT_NAME:-}" ] || [ -n "$parent_override" ]; then
+            max_iters=20
+        else
+            max_iters=0  # 0 = unlimited
+        fi
+    fi
     [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid name: letters/digits/dash/underscore only"
 
     # Determine parent: explicit flag > env (auto when called from an agent) > none
     local parent="$parent_override"
     [ -z "$parent" ] && parent="${C3R_AGENT_NAME:-}"
 
-    # Enforce max_agents cap
+    # Enforce max_agents cap (only count ACTIVE agents — stopped ones don't take a slot)
     python3 - "$state" "$name" "$parent" <<'PY'
 import json, sys
 sp, name, parent = sys.argv[1], sys.argv[2], sys.argv[3]
 s = json.load(open(sp))
-if any(a["name"] == name for a in s["agents"]):
-    print(f"[spawn] agent '{name}' already exists", file=sys.stderr); sys.exit(2)
+# An existing entry with status=stopped is fine to overwrite — the worktree
+# will be force-recreated. Block on duplicate ACTIVE names only.
+existing = next((a for a in s["agents"] if a["name"] == name), None)
+if existing and existing.get("status") != "stopped":
+    print(f"[spawn] active agent '{name}' already exists", file=sys.stderr); sys.exit(2)
 cap = s.get("max_agents", 4)
-if len(s["agents"]) >= cap:
-    print(f"[spawn] max_agents cap reached ({cap}) — kill an agent first", file=sys.stderr); sys.exit(3)
+active = [a for a in s["agents"] if a.get("status") != "stopped"]
+if len(active) >= cap:
+    print(f"[spawn] max_agents cap reached ({cap} active) — kill or wait for an agent to free a slot", file=sys.stderr); sys.exit(3)
 if parent and not any(a["name"] == parent for a in s["agents"]):
     print(f"[spawn] parent '{parent}' does not exist", file=sys.stderr); sys.exit(4)
 PY
@@ -1352,6 +1369,10 @@ for a in s['agents']:
     cp "$C3R_DIR/templates/INBOX.md"        "$wt/.c3r/INBOX.md"
     printf '# INBOX ARCHIVE\n' > "$wt/.c3r/INBOX_ARCHIVE.md"
     write_agent_conf "$wt" "$name" "$role" "$model"
+    # Append the iteration budget — agent_loop.sh self-kills when last_iter >= MAX_ITERATIONS
+    if [ "$max_iters" -gt 0 ] 2>/dev/null; then
+        echo "MAX_ITERATIONS=$max_iters" >> "$wt/.c3r/agent.conf"
+    fi
     # Sandbox hook
     mkdir -p "$wt/.claude"
     cp "$C3R_DIR/templates/claude_settings.json" "$wt/.claude/settings.json"

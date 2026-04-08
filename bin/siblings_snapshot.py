@@ -34,10 +34,23 @@ def main() -> int:
     if not me:
         print(f"no such agent: {me_name}", file=sys.stderr); return 1
 
-    siblings = [a for a in state["agents"] if a["name"] != me_name]
+    # Children: agents whose parent == me (recursively → all descendants)
+    def descendants(name):
+        out = []
+        for a in state["agents"]:
+            if a.get("parent") == name:
+                out.append(a)
+                out.extend(descendants(a["name"]))
+        return out
+    my_children = descendants(me_name)
+    my_child_names = {a["name"] for a in my_children}
+    siblings = [a for a in state["agents"]
+                if a["name"] != me_name
+                and a["name"] not in my_child_names
+                and a.get("status") != "stopped"]
     project = state.get("project", "?")
-    base_branch = f"c3r/{project}"  # conventional c3r base branch
-    repo = me["worktree"]  # run git in my own worktree
+    base_branch = f"c3r/{project}"
+    repo = me["worktree"]
 
     lines = [
         f"# SIBLINGS — auto-regenerated at the start of each iteration",
@@ -66,9 +79,51 @@ def main() -> int:
         f"",
     ]
 
+    # ---- YOUR CHILDREN section (always first when present) ----
+    if my_children:
+        from datetime import datetime, timezone
+        lines.append("## YOUR CHILDREN — agents YOU spawned and YOU must manage")
+        lines.append("")
+        lines.append("These are sub-agents you spawned (directly or transitively).")
+        lines.append("**YOU are responsible for killing them when their task is done,")
+        lines.append("they get stuck, or they exceed their useful budget.** Each child")
+        lines.append("also has a hard iteration cap and will self-kill at MAX_ITERATIONS,")
+        lines.append("but that's a safety net — proactive management is your job.")
+        lines.append("")
+        for c in my_children:
+            status = c.get("status", "?")
+            iter_n = c.get("last_iter", 0)
+            ts = c.get("last_iter_ts")
+            rel = ""
+            if ts:
+                try:
+                    dt = datetime.fromisoformat(ts)
+                    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+                    rel = (f"{secs}s ago" if secs<60 else f"{secs//60}m ago"
+                           if secs<3600 else f"{secs//3600}h ago")
+                except Exception: pass
+            stale = "  ⚠ STALE — consider killing" if rel and "h ago" in rel and int(rel.split("h")[0]) >= 2 else ""
+            stopped = "  (already stopped)" if status == "stopped" else ""
+            lines.append(f"- **{c['name']}** ({c.get('role','?')}, parent={c.get('parent','?')}) — "
+                         f"status={status}, iter=#{iter_n}, last={rel or 'never'}{stale}{stopped}")
+            lines.append(f"  Focus: {c.get('focus','(none)')}")
+        lines.append("")
+        lines.append("**Decision rules** (apply at the top of every iteration):")
+        lines.append("1. If a child's last RESEARCH_LOG entry says its task is done, kill it: `$C3R_BIN/c3r kill <name>`")
+        lines.append("2. If a child has been stale (no iter for >2 hours), kill it.")
+        lines.append("3. If a child's fail_streak ≥ 3 in state.json, investigate or kill it.")
+        lines.append("4. Otherwise, leave it running and check again next iteration.")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     if not siblings:
-        lines.append("_(no siblings in this project)_")
+        lines.append("## SIBLINGS")
+        lines.append("")
+        lines.append("_(no other active agents in this project)_")
     else:
+        lines.append("## SIBLINGS — peers you do NOT manage (other agents' work)")
+        lines.append("")
         # Worktrees share the same .git directory, so sibling branch refs
         # are already up to date locally — no fetch needed.
         for sib in siblings:

@@ -282,15 +282,37 @@ agent/<you>".
 
 ## Sub-agents (spawn/kill)
 
-You can spawn a dedicated sub-agent for a bounded sub-task using:
+**The ONLY way to spawn a sub-agent is `$C3R_BIN/c3r spawn`.** Do not use the
+Task tool, do not use Claude Code's built-in agent definitions, do not write
+your own sub-process workers. The Task tool is explicitly disabled at the
+CLI level for this exact reason (`--disallowedTools Task`). The c3r spawn
+mechanism is the only one that:
+
+  - Creates a real git worktree on its own branch
+  - Creates a Discord thread the human can see and interact with
+  - Counts against the project's `max_agents` cap
+  - Appears in `c3r watch` with status, iter count, and context %
+  - Can be killed cleanly via `c3r kill`
+  - Has its own RESEARCH_LOG, INBOX, and ENV
+  - Self-kills when its iteration budget is reached
+
+Any other "sub-agent" mechanism is invisible to c3r and to the human. If
+you're tempted to use one, stop and use `c3r spawn` instead.
+
+Usage:
 
 ```
-$C3R_BIN/c3r spawn <name> <role> "<one-sentence focus>" [--model sonnet|opus|haiku]
+$C3R_BIN/c3r spawn <name> <role> "<one-sentence focus>" [--model sonnet|opus|haiku] [--max-iters N]
 ```
 
 The spawned agent becomes your child (parent link auto-filled from your env).
 It runs in its own worktree, gets its own Discord thread, and joins the tmux
 session immediately. You can spawn children recursively (they can spawn too).
+
+**`--max-iters N`** sets the child's hard iteration budget. **It defaults to
+20 for any sub-agent**, which is usually plenty for a bounded research task.
+Override only if you have a clear reason. The child will self-kill at the
+budget; that's a safety net, not a substitute for proactive parent oversight.
 
 **When to spawn:**
 - A task you were assigned decomposes cleanly into an independent sub-task
@@ -308,9 +330,27 @@ session immediately. You can spawn children recursively (they can spawn too).
 - The sub-task would finish in less than one of your own iterations (overhead
   of spawning > benefit).
 
+**Managing your children — read this every iteration.** At the top of every
+iteration, your `.c3r/SIBLINGS.md` will have a `## YOUR CHILDREN` section
+listing every sub-agent you spawned (directly or transitively). For each
+child, decide:
+
+1. **Is its task done?** Read its latest RESEARCH_LOG entry (via
+   `git show agent/<child>:.c3r/RESEARCH_LOG.md | tail -30`). If the child
+   has clearly finished its bounded task, **kill it** — don't let it idle.
+2. **Is it stale?** If `last_iter` was more than 2 hours ago, the child is
+   probably stuck or its task is done and it ran out of things to do. Kill it.
+3. **Is it failing?** If `fail_streak ≥ 3`, investigate (read its log) and
+   either kill or ping its INBOX with a course correction.
+4. **Otherwise**, leave it running and check again next iteration.
+
+**Forgotten children are a known failure mode.** Each child has a hard
+iteration budget that will self-kill it as a safety net, but burning through
+the budget on a stuck child wastes quota and Discord noise. Manage proactively.
+
 **When to kill a child:**
 - Its task is done and further iterations would be wasted quota.
-- You detect it's stuck or drifting off-task.
+- You detect it's stuck (stale `last_iter_ts` or no commits in 5+ iters).
 - You need the agent slot back to spawn a different sub-agent.
 
 Kill with:

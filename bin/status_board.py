@@ -58,8 +58,10 @@ STATUS_EMOJI = {"idle": "⚪", "running": "🟢", "paused": "⏸", "error": "�
 
 def render(state: dict) -> str:
     cap = state.get("max_agents", "?")
-    total = len(state["agents"])
-    lines = [f"## c3r · {state['project']}   `{total}/{cap} agents`"]
+    active_n = sum(1 for a in state["agents"] if a.get("status") != "stopped")
+    stopped_n = sum(1 for a in state["agents"] if a.get("status") == "stopped")
+    suffix = f" · {stopped_n} stopped" if stopped_n else ""
+    lines = [f"## c3r · {state['project']}   `{active_n}/{cap} active{suffix}`"]
     if state.get("paused"):
         lines.append("**⏸ PAUSED** — agents will finish current iteration then halt.")
     lines.append("```")

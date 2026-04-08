@@ -40,6 +40,8 @@ ENV_FILE="$C3R_WORKTREE/.c3r/env.sh"
 AGENT_MODEL="${AGENT_MODEL:-claude-sonnet-4-6}"
 ITERATION_COOLDOWN_SEC="${ITERATION_COOLDOWN_SEC:-20}"
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
+# 0 or empty = unlimited. Sub-agents default to 20 (set by c3r spawn).
+MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 # Per-iteration wall-clock cap. Default 5400 (90 min).
 ITERATION_TIMEOUT_SEC="${ITERATION_TIMEOUT_SEC-5400}"
 # Context window size in tokens. Claude Opus/Sonnet 4.6 both have 1M
@@ -86,6 +88,17 @@ while :; do
     # visibility at the top of every iteration
     "$C3R_BIN/siblings_snapshot.py" "$C3R_STATE" "$C3R_AGENT_NAME" 2>/dev/null || true
 
+    # --- iteration budget self-kill (sub-agents) ---
+    if [ "${MAX_ITERATIONS:-0}" -gt 0 ] 2>/dev/null && [ "$iter_id" -ge "$MAX_ITERATIONS" ]; then
+        echo "[agent_loop] iteration budget reached ($iter_id/$MAX_ITERATIONS); self-killing $C3R_AGENT_NAME" >&2
+        "$C3R_BIN/notify.py" --thread "${C3R_AGENT_THREAD_ID:-}" \
+            "🛑 Reached my iteration budget ($MAX_ITERATIONS). Self-killing." 2>/dev/null || true
+        # Defer to c3r kill so the cleanup logic runs (status, thread, board)
+        "$C3R_BIN/../c3r" kill "$C3R_AGENT_NAME" 2>&1 || true
+        # The kill should tear down the tmux window we're in; if not, exit.
+        exit 0
+    fi
+
     # --- circuit breaker ---
     if [ "$fail_streak" -ge "$MAX_CONSECUTIVE_FAILURES" ]; then
         echo "[agent_loop] circuit breaker tripped after $fail_streak failures; pausing" >&2
@@ -110,7 +123,11 @@ while :; do
     # Without this, a hung GPU subprocess becomes an orphan holding memory
     # and cascading OOMs into subsequent iterations.
     # --dangerously-skip-permissions is REQUIRED for autonomous loops.
-    setsid bash -c "claude -p --output-format json --model '$AGENT_MODEL' --dangerously-skip-permissions < '$PROMPT' > '$tmp_out' 2>&1" &
+    # --disallowedTools Task blocks Claude Code's built-in Task tool, which
+    # would otherwise let the agent spawn an in-context sub-agent that c3r
+    # has no visibility into (no worktree, no thread, no max_agents budget).
+    # Sub-agent spawning MUST go through `$C3R_BIN/c3r spawn` so it's tracked.
+    setsid bash -c "claude -p --output-format json --model '$AGENT_MODEL' --dangerously-skip-permissions --disallowedTools Task < '$PROMPT' > '$tmp_out' 2>&1" &
     iter_pid=$!
     watchdog_pid=""
     if [ -n "$ITERATION_TIMEOUT_SEC" ]; then
