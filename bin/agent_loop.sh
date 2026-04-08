@@ -81,21 +81,36 @@ while :; do
     tmp_out="$(mktemp /tmp/c3r_iter.XXXXXX.json)"
     trap 'rm -f "$tmp_out"' EXIT
 
-    # --- invoke claude code headless ---
-    # `--output-format json` returns a JSON envelope including usage counts.
-    # --dangerously-skip-permissions is REQUIRED for autonomous loops: without
-    # it, `claude -p` runs in restricted mode and refuses Edit/Write/Bash, so
-    # the agent would read files, reason, and exit without doing any work.
-    # Optional wall-clock cap. Empty ITERATION_TIMEOUT_SEC = no timeout
-    # (default, correct for long training runs). Set in agent.conf if you
-    # want a safety net for a project with predictable iter lengths.
-    _iter_prefix=()
+    # --- invoke claude code headless in its own process group ---
+    # `setsid` puts claude in a new session/process group so we can
+    # SIGTERM/SIGKILL the ENTIRE subprocess tree on timeout — including
+    # grandchildren like Isaac Sim, Omniverse, pytorch processes, etc.
+    # Without this, a hung GPU subprocess becomes an orphan holding memory
+    # and cascading OOMs into subsequent iterations.
+    # --dangerously-skip-permissions is REQUIRED for autonomous loops.
+    setsid bash -c "claude -p --output-format json --model '$AGENT_MODEL' --dangerously-skip-permissions < '$PROMPT' > '$tmp_out' 2>&1" &
+    iter_pid=$!
+    watchdog_pid=""
     if [ -n "$ITERATION_TIMEOUT_SEC" ]; then
-        _iter_prefix=(timeout "$ITERATION_TIMEOUT_SEC")
+        (
+            sleep "$ITERATION_TIMEOUT_SEC"
+            if kill -0 "$iter_pid" 2>/dev/null; then
+                echo "[agent_loop] timeout after ${ITERATION_TIMEOUT_SEC}s — SIGTERM process group $iter_pid" >&2
+                # Negative pid = entire process group
+                kill -TERM -"$iter_pid" 2>/dev/null || true
+                sleep 30
+                if kill -0 "$iter_pid" 2>/dev/null; then
+                    echo "[agent_loop] process group still alive after SIGTERM — SIGKILL" >&2
+                    kill -KILL -"$iter_pid" 2>/dev/null || true
+                fi
+            fi
+        ) &
+        watchdog_pid=$!
     fi
-    if "${_iter_prefix[@]}" claude -p --output-format json --model "$AGENT_MODEL" \
-            --dangerously-skip-permissions < "$PROMPT" > "$tmp_out" 2>&1; then
-        # parse usage (best effort; missing keys → 0)
+    if wait "$iter_pid" 2>/dev/null; then iter_ok=1; else iter_ok=0; fi
+    [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null && wait "$watchdog_pid" 2>/dev/null || true
+
+    if [ "$iter_ok" = 1 ]; then
         usage_in=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('input_tokens',0))" 2>/dev/null || echo 0)
         usage_out=$(python3 -c "import json,sys;d=json.load(open('$tmp_out'));print(d.get('usage',{}).get('output_tokens',0))" 2>/dev/null || echo 0)
         total=$((usage_in + usage_out))

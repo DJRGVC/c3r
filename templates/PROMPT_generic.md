@@ -83,11 +83,22 @@ context window. The files on disk are your only persistent memory.
    tool calls) is hard-killed at 5400 seconds. This has major implications
    for long training runs:
 
+   - **ALWAYS run a 30-second smoke test BEFORE launching a long training
+     job.** Use Claude Code's Bash tool `timeout` parameter to cap the
+     smoke test. Example for a GPU/simulator job: run the simulator with
+     `--headless`, `num_envs=4`, `max_iterations=2` and a 30s bash timeout.
+     If it fails to even START (display error, missing binary, wrong env),
+     the smoke test catches it in 30s instead of wasting 80 minutes.
+     If the smoke test hangs past 30s, the Bash tool kills it and returns
+     a timeout error — treat that as a setup failure and ask the human.
    - **Never launch a training run longer than ~80 minutes.** Leave ~10 min
      for parsing metrics, writing the log entry, and committing.
    - **Checkpoint frequently during training** — every 5–10 minutes at
      most. If your iteration is killed mid-train, the next iteration needs
      to resume from the latest checkpoint, not start from scratch.
+   - **The iteration hard-cap will SIGKILL the entire subprocess tree** at
+     the 90-minute mark, including orphaned simulator/GPU processes. You
+     cannot prevent this — design your training command to be resumable.
    - **At the end of every iteration, record in RESEARCH_LOG.md**: the
      checkpoint path, the current step/epoch, and the last metric value.
      This is how the next iteration knows what to resume.
