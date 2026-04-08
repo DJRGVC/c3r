@@ -56,12 +56,41 @@ def req(method: str, path: str, body=None):
 
 STATUS_EMOJI = {"idle": "⚪", "running": "🟢", "paused": "⏸", "error": "🔴", "stopped": "⚫"}
 
+def fetch_usage_summary() -> str:
+    """Call claude_usage.py and return a one-liner for the board header.
+    Returns empty string if usage data is unavailable (so the board still
+    renders cleanly).
+    """
+    import subprocess, sys as _sys
+    try:
+        usage_script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "claude_usage.py")
+        proc = subprocess.run([_sys.executable, usage_script], capture_output=True, text=True, timeout=8)
+        if proc.returncode != 0: return ""
+        d = json.loads(proc.stdout)
+        if d.get("source") != "claude.ai_live": return ""
+        plan = d.get("plan", "?")
+        fh = (d.get("five_hour") or {}).get("utilization")
+        sd = (d.get("seven_day") or {}).get("utilization")
+        sd_son = (d.get("seven_day_sonnet") or {}).get("utilization")
+        sd_op = (d.get("seven_day_opus") or {}).get("utilization")
+        parts = [f"plan: **{plan}**"]
+        if fh is not None: parts.append(f"5h: {fh:.0f}%")
+        if sd is not None: parts.append(f"7d: {sd:.0f}%")
+        if sd_son is not None: parts.append(f"7d-sonnet: {sd_son:.0f}%")
+        if sd_op is not None: parts.append(f"7d-opus: {sd_op:.0f}%")
+        return "  ·  ".join(parts)
+    except Exception:
+        return ""
+
 def render(state: dict) -> str:
     cap = state.get("max_agents", "?")
     active_n = sum(1 for a in state["agents"] if a.get("status") != "stopped")
     stopped_n = sum(1 for a in state["agents"] if a.get("status") == "stopped")
     suffix = f" · {stopped_n} stopped" if stopped_n else ""
     lines = [f"## c3r · {state['project']}   `{active_n}/{cap} active{suffix}`"]
+    usage_line = fetch_usage_summary()
+    if usage_line:
+        lines.append(usage_line)
     if state.get("paused"):
         lines.append("**⏸ PAUSED** — agents will finish current iteration then halt.")
     lines.append("```")
@@ -105,6 +134,24 @@ def save_state(path: str, state: dict) -> None:
     with open(tmp, "w") as f: json.dump(state, f, indent=2)
     os.replace(tmp, path)
 
+def _suppress_pin_notification(channel: str, board_msg_id: str) -> None:
+    """When you PIN a message via the Discord API, Discord auto-posts a
+    'X pinned a message to this channel' system message (type=6). It's
+    spammy on every bump. We delete it right after pinning. Requires the
+    bot's Manage Messages permission (which it already has for pinning)."""
+    try:
+        msgs = req("GET", f"/channels/{channel}/messages?limit=10") or []
+        for m in msgs:
+            # Type 6 = CHANNEL_PINNED_MESSAGE; we only delete those that
+            # reference our just-created board message id
+            if m.get("type") == 6:
+                ref = (m.get("message_reference") or {}).get("message_id")
+                if ref == board_msg_id:
+                    req("DELETE", f"/channels/{channel}/messages/{m['id']}")
+                    return
+    except Exception as e:
+        print(f"[board] could not delete pin-notification system message: {e}", file=sys.stderr)
+
 def cmd_init(args) -> int:
     state = load_state(args.state)
     channel = state["channel_id"]
@@ -113,6 +160,7 @@ def cmd_init(args) -> int:
     state["board_message_id"] = msg["id"]
     try:
         req("PUT", f"/channels/{channel}/pins/{msg['id']}")
+        _suppress_pin_notification(channel, msg["id"])
     except Exception:
         print("[board] pin failed (bot may lack Manage Messages); continuing", file=sys.stderr)
     for a in state["agents"]:

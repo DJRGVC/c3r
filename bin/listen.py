@@ -88,23 +88,33 @@ def handle_channel_cmd(state, state_path, content, channel):
     parts = content.strip().split(None, 2)
     if len(parts) < 2: return
     cmd = parts[1].lower()
+    # Always post the user-visible ack FIRST so confirmation never gets
+    # lost behind a slow board update or transient subprocess failure.
     if cmd == "help":
         post(channel, HELP_TEXT)
     elif cmd == "status":
+        post(channel, "🔄 Bumping status board...")
         subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "bump", "--state", state_path], check=False)
     elif cmd == "pause":
+        # Apply state change immediately, ack user, then update board
         for a in state["agents"]:
             Path(a["worktree"]).joinpath(".c3r/PAUSED").touch()
         state["paused"] = True; save_state(state_path, state)
-        subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "update", "--state", state_path], check=False)
-        post(channel, "⏸ All agents will pause after their current iteration.")
+        post(channel, "⏸ **PAUSE** — all agents will halt after their current iteration completes. Use `!c3r resume` to continue.")
+        try:
+            subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "update", "--state", state_path], check=False, timeout=10)
+        except Exception as e:
+            print(f"[listen] board update after pause failed: {e}", file=sys.stderr)
     elif cmd == "resume":
         for a in state["agents"]:
             try: Path(a["worktree"]).joinpath(".c3r/PAUSED").unlink()
             except FileNotFoundError: pass
         state["paused"] = False; save_state(state_path, state)
-        subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "update", "--state", state_path], check=False)
-        post(channel, "▶ Agents resumed.")
+        post(channel, "▶ **RESUME** — agents will pick up from where they left off within ~30s.")
+        try:
+            subprocess.run([sys.executable, str(C3R_BIN / "status_board.py"), "update", "--state", state_path], check=False, timeout=10)
+        except Exception as e:
+            print(f"[listen] board update after resume failed: {e}", file=sys.stderr)
     elif cmd == "ping":
         if len(parts) < 3:
             post(channel, "usage: `!c3r ping <agent> <message>`"); return
