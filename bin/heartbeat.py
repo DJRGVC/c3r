@@ -60,20 +60,23 @@ def main() -> int:
     # Redraw the board
     subprocess.run([sys.executable, f"{C3R_BIN}/status_board.py", "update", "--state", args.state], check=False)
 
-    # Threshold alerts
+    # Threshold alerts — fire ONCE per heartbeat at the HIGHEST threshold
+    # crossed, not once per threshold. Otherwise a 0→100% jump (which is
+    # what you get when the cache-aware fix lands and pre-existing logs
+    # suddenly start being counted) sends 4 notifications back-to-back.
     if args.context_pct is not None and agent.get("thread_id"):
-        thresholds = [25, 50, 75, 100]
-        for t in thresholds:
-            if prev_pct < t <= args.context_pct:
-                user = os.environ.get("DISCORD_USER_ID", "")
-                mention = f"<@{user}> " if user and t >= 75 else ""
-                icon = "🟢" if t == 25 else "🟡" if t == 50 else "🟠" if t == 75 else "🔴"
-                msg = f"{mention}{icon} **{args.agent}** context at **{args.context_pct}%** — "
-                if t >= 75:
-                    msg += "consider pruning RESEARCH_LOG.md or tightening scope before next iter."
-                else:
-                    msg += "heads up."
-                subprocess.run([f"{C3R_BIN}/notify.py", "--thread", agent["thread_id"], msg], check=False)
+        crossed = [t for t in (25, 50, 75, 100) if prev_pct < t <= args.context_pct]
+        if crossed:
+            t = max(crossed)
+            user = os.environ.get("DISCORD_USER_ID", "")
+            mention = f"<@{user}> " if user and t >= 75 else ""
+            icon = "🟢" if t == 25 else "🟡" if t == 50 else "🟠" if t == 75 else "🔴"
+            msg = f"{mention}{icon} **{args.agent}** context at **{args.context_pct}%** — "
+            if t >= 75:
+                msg += "consider pruning RESEARCH_LOG.md or tightening scope before next iter."
+            else:
+                msg += "heads up."
+            subprocess.run([f"{C3R_BIN}/notify.py", "--thread", agent["thread_id"], msg], check=False)
 
     # Fail streak alert
     if args.fail and agent.get("fail_streak", 0) >= 3 and agent.get("thread_id"):

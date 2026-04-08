@@ -56,6 +56,26 @@ def req(method: str, path: str, body=None):
 
 STATUS_EMOJI = {"idle": "⚪", "running": "🟢", "paused": "⏸", "error": "🔴", "stopped": "⚫"}
 
+# ANSI color helpers for Discord ```ansi``` code blocks. Single-cell widths
+# only — no emoji — so column alignment is consistent.
+ANSI_RESET = "\u001b[0m"
+ANSI_BOLD  = "\u001b[1;37m"
+ANSI_DIM   = "\u001b[2;37m"
+ANSI_GREEN = "\u001b[2;32m"
+ANSI_GREY  = "\u001b[2;30m"
+ANSI_YELLO = "\u001b[2;33m"
+ANSI_RED   = "\u001b[2;31m"
+ANSI_BLUE  = "\u001b[2;34m"
+ANSI_CYAN  = "\u001b[2;36m"
+
+STATUS_GLYPH = {
+    "running": ANSI_GREEN + "●" + ANSI_RESET,
+    "idle":    ANSI_DIM   + "○" + ANSI_RESET,
+    "paused":  ANSI_YELLO + "‖" + ANSI_RESET,
+    "error":   ANSI_RED   + "✗" + ANSI_RESET,
+    "stopped": ANSI_GREY  + "·" + ANSI_RESET,
+}
+
 # Discord embed color stripe (decimal RGB)
 COLOR_GREEN  = 0x57F287   # all healthy
 COLOR_YELLOW = 0xFEE75C   # warnings (paused, high context, mid-activity)
@@ -159,82 +179,107 @@ def _rel_time(ts_str: str | None) -> str:
         return "—"
 
 def render_embed(state: dict) -> dict:
-    """Build a rich Discord embed for the status board."""
+    """Build a rich Discord embed for the status board.
+
+    Layout: ONE ```ansi``` code block in embed.description containing both
+    USAGE and AGENTS sections. ANSI escapes give us colored status glyphs
+    + section headers without breaking column alignment. Single-cell
+    characters everywhere — no emoji in the monospace area.
+    """
     cap = state.get("max_agents", "?")
     agents = state.get("agents", [])
     active_n = sum(1 for a in agents if a.get("status") != "stopped")
     stopped_n = sum(1 for a in agents if a.get("status") == "stopped")
 
-    # Description = paused badge ONLY (or empty). The agent count moves
-    # to the bottom of the agent field for a cleaner top→bottom flow.
-    desc_lines = []
-    if state.get("paused"):
-        desc_lines.append("⏸ **PAUSED** — agents will halt after their current iteration")
+    NAME_W = 22
+    MODEL_W = 6
+    ITER_W = 5
 
-    # ── Build agent tree ──
+    block_lines = []
+
+    # ── USAGE section ──
+    usage = fetch_usage_data()
+    if usage:
+        block_lines.append(f"{ANSI_BOLD}USAGE{ANSI_RESET}")
+        def usage_row(label, w):
+            if not w: return
+            p = w.get("utilization")
+            if p is None: return
+            bar = _bar10(p)
+            if p >= 80:   c = ANSI_RED
+            elif p >= 50: c = ANSI_YELLO
+            else:         c = ANSI_GREEN
+            rel = _resets_in(w.get("resets_at"))
+            rel_str = f" {ANSI_DIM}resets {rel}{ANSI_RESET}" if rel else ""
+            block_lines.append(f"  {label:<{NAME_W}} {c}{bar}{ANSI_RESET}  {p:>3.0f}%{rel_str}")
+        usage_row("5h window",   usage.get("five_hour"))
+        usage_row("7d window",   usage.get("seven_day"))
+        usage_row("7d · sonnet", usage.get("seven_day_sonnet"))
+        usage_row("7d · opus",   usage.get("seven_day_opus"))
+        block_lines.append("")
+
+    # ── AGENTS section ──
+    block_lines.append(f"{ANSI_BOLD}AGENTS{ANSI_RESET}")
+
     by_name = {a["name"]: a for a in agents}
     children = {}
     for a in agents:
         children.setdefault(a.get("parent"), []).append(a["name"])
 
-    # Tighter table — drop the STATUS text column (emoji shows it),
-    # drop "ago" from LAST (less noise), give names a bit more room
-    table_lines = []
-
     def row(name, depth):
         a = by_name[name]
         st = a.get("status", "idle")
-        e = STATUS_EMOJI.get(st, "·")
-        model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:6]
+        glyph = STATUS_GLYPH.get(st, ANSI_GREY + "·" + ANSI_RESET)
+        model_short = a.get("model", "").replace("claude-", "").replace("-4-6", "").replace("-4-5-20251001", "")[:MODEL_W]
         iter_n = f"#{a.get('last_iter', 0)}"
         ctx = a.get("last_context_pct", 0)
-        ctx_str = f"{_ctx_glyph(ctx)} {ctx:>3}%"
-        rel = _rel_time(a.get("last_iter_ts")).replace(" ago", "")
+        bar = _bar10(ctx)
+        if ctx >= 75:   bar_c = ANSI_RED
+        elif ctx >= 50: bar_c = ANSI_YELLO
+        elif ctx > 0:   bar_c = ANSI_GREEN
+        else:           bar_c = ANSI_DIM
         prefix = "  " * depth + ("└ " if depth > 0 else "")
-        label = f"{e} {prefix}{a['name']}"[:24]
-        table_lines.append(f"{label:<24}  {model_short:<6}  {iter_n:<5}  {ctx_str}")
-        # Inline warnings under the row when notable
+        label = (prefix + a["name"])[:NAME_W - 2]
+        block_lines.append(
+            f"  {glyph} {label:<{NAME_W - 2}} "
+            f"{model_short:<{MODEL_W}} "
+            f"{iter_n:<{ITER_W}} "
+            f"{bar_c}{bar}{ANSI_RESET}  "
+            f"{ctx:>3}%"
+        )
         badges = []
         if a.get("fail_streak", 0) >= 3:
-            badges.append(f"⚠ fail_streak={a['fail_streak']}")
+            badges.append(f"fail_streak={a['fail_streak']}")
         if ctx >= 75 and st != "stopped":
-            badges.append(f"⚠ context near full")
+            badges.append("context near full")
         if a.get("status") == "error":
-            badges.append("⚠ last iter errored")
+            badges.append("last iter errored")
         if badges:
-            table_lines.append(f"{' ' * 22} {' · '.join(badges)}")
+            block_lines.append(f"  {' ' * (NAME_W)} {ANSI_RED}⚠ {' · '.join(badges)}{ANSI_RESET}")
         for c in children.get(name, []):
             row(c, depth + 1)
 
     for root in children.get(None, []):
         row(root, 0)
 
-    # Capacity line goes UNDER the agents inside the same code block
+    # Divider + capacity line at the bottom of the same block
+    block_lines.append(f"  {ANSI_DIM}{'─' * 50}{ANSI_RESET}")
     cap_str = f"{active_n}/{cap} active"
     if stopped_n: cap_str += f" · {stopped_n} stopped"
-    table_lines.append("─" * 50)
-    table_lines.append(cap_str)
+    if state.get("paused"):
+        cap_str = f"{ANSI_YELLO}⏸ PAUSED{ANSI_RESET}  ·  " + cap_str
+    block_lines.append(f"  {cap_str}")
 
-    table_block = "```\n" + "\n".join(table_lines) + "\n```"
+    description = "```ansi\n" + "\n".join(block_lines) + "\n```"
 
-    fields = _usage_fields(fetch_usage_data())
-    fields.append({
-        "name": "Agents",
-        "value": table_block,
-        "inline": False,
-    })
-
-    embed = {
+    return {
         "title": f"c3r · {state['project']}",
         "color": _health_color(state),
-        "fields": fields,
+        "description": description,
         "footer": {
             "text": f"updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  ·  auto-refresh 60s"
         },
     }
-    if desc_lines:
-        embed["description"] = "\n".join(desc_lines)
-    return embed
 
 # Backwards-compatible plain-text renderer (used by `c3r status` console output).
 def render(state: dict) -> str:
