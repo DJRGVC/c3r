@@ -36,16 +36,20 @@ for a in json.load(open('$STATE'))['agents']:
 ")
 [ "${#AGENTS[@]}" -gt 0 ] || { echo "[launch] no agents in state.json" >&2; exit 1; }
 
+# SECURITY: source the config.env so credentials live in env vars only
+# (not on the command line where `ps -ef` could leak them to other users).
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/c3r/config.env"
+
 first=1
 for line in "${AGENTS[@]}"; do
     IFS=$'\t' read -r name worktree thread <<<"$line"
+    # Source config.env inside the bash command to load Discord creds without
+    # putting them on the visible-to-`ps` command line.
     env_cmd="cd '$worktree' && \
+        set -a; . '$CONFIG_FILE'; set +a; \
         export C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$STATE' \
         C3R_AGENT_NAME='$name' C3R_WORKTREE='$worktree' \
-        C3R_AGENT_THREAD_ID='$thread' \
-        DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' \
-        DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' \
-        DISCORD_USER_ID='$DISCORD_USER_ID' && \
+        C3R_AGENT_THREAD_ID='$thread' && \
         '$C3R_BIN/agent_loop.sh'"
     if [ "$first" = 1 ]; then
         tmux new-session -d -s "$SESSION" -n "$name" "bash -lc \"$env_cmd\""

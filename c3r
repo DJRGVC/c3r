@@ -19,6 +19,8 @@ ok()    { echo "${GREEN}[c3r] ✓${RESET} $*"; }
 warn()  { echo "${YELLOW}[c3r] ⚠${RESET} $*" >&2; }
 die()   { echo "${RED}[c3r] ✗${RESET} $*" >&2; exit 1; }
 ask()   { local prompt="$1" default="${2:-}" var; read -rp "$prompt" var; echo "${var:-$default}"; }
+# Silent input for secrets — no echo to terminal, no shell history
+ask_secret() { local prompt="$1" default="${2:-}" var; read -rsp "$prompt" var; echo >&2; echo "${var:-$default}"; }
 
 load_config() {
     [ -f "$CONFIG_FILE" ] && { set -a; . "$CONFIG_FILE"; set +a; } || true
@@ -658,7 +660,8 @@ Steps (one-time, ~5 minutes):
 EOF
     load_config
     local tok cid uid plan
-    tok=$(ask "Discord bot token [${DISCORD_BOT_TOKEN:+keep existing}]: " "${DISCORD_BOT_TOKEN:-}")
+    # Silent input — token never echoes to terminal, never lands in shell history
+    tok=$(ask_secret "Discord bot token (input hidden) [${DISCORD_BOT_TOKEN:+keep existing}]: " "${DISCORD_BOT_TOKEN:-}")
     cid=$(ask "Project channel ID [${DISCORD_CHANNEL_ID:-}]: " "${DISCORD_CHANNEL_ID:-}")
     uid=$(ask "Your Discord user ID [${DISCORD_USER_ID:-}]: " "${DISCORD_USER_ID:-}")
     [ -n "$tok" ] && [ -n "$cid" ] && [ -n "$uid" ] || die "all three values required"
@@ -1060,6 +1063,9 @@ cmd_launch() {
         return 0
     fi
 
+    # Make sure config.env is chmod 600 — if user accidentally chmod'd it
+    [ -f "$CONFIG_FILE" ] && chmod 600 "$CONFIG_FILE"
+
     # Sync each agent's model from agent.conf → state.json so the dashboard
     # reflects runtime config. agent.conf is the source of truth at runtime.
     python3 - "$state" <<'PY'
@@ -1081,9 +1087,11 @@ PY
 
     "$C3R_DIR/scripts/launch_agents.sh" "$target"
 
-    # Add a listener window
+    # Add a listener window. SECURITY: source config.env so DISCORD_BOT_TOKEN
+    # is not visible in `ps -ef`. The export-on-command-line pattern leaks
+    # secrets to any local user with shell access.
     tmux new-window -t "$session" -n "listen" \
-        "bash -lc \"export C3R_STATE='$state' DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' DISCORD_USER_ID='$DISCORD_USER_ID' && '$C3R_BIN/listen.py'\""
+        "bash -lc \"set -a; . '$CONFIG_FILE'; set +a; export C3R_STATE='$state' && '$C3R_BIN/listen.py'\""
     ok "session '$session' up (including listener window)"
     info "attach: tmux attach -t $session"
 }
@@ -1673,13 +1681,12 @@ PY
     local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
     if tmux has-session -t "$session" 2>/dev/null; then
         local thread_id; thread_id="$(python3 -c "import json;s=json.load(open('$state'));print([a['thread_id'] for a in s['agents'] if a['name']=='$name'][0])")"
+        # SECURITY: source config.env so credentials never appear on argv
         local env_cmd="cd '$wt' && \
+set -a; . '$CONFIG_FILE'; set +a; \
 export C3R_DIR='$C3R_DIR' C3R_BIN='$C3R_BIN' C3R_STATE='$state' \
 C3R_AGENT_NAME='$name' C3R_WORKTREE='$wt' \
-C3R_AGENT_THREAD_ID='$thread_id' \
-DISCORD_BOT_TOKEN='$DISCORD_BOT_TOKEN' \
-DISCORD_CHANNEL_ID='$DISCORD_CHANNEL_ID' \
-DISCORD_USER_ID='$DISCORD_USER_ID' && \
+C3R_AGENT_THREAD_ID='$thread_id' && \
 '$C3R_BIN/agent_loop.sh'"
         tmux new-window -t "$session" -n "$name" "bash -lc \"$env_cmd\""
         ok "spawned $name → live in tmux session $session"
