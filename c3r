@@ -127,6 +127,10 @@ ${BOLD}HUMAN ↔ AGENT${RESET}
 
 ${BOLD}MAINTENANCE${RESET}
   update                  git pull c3r itself (template/tool updates)
+  upgrade [path]          full in-place upgrade for an existing project:
+                          git pull, stop, re-render PROMPT.md from new
+                          template, append missing agent.conf fields,
+                          seed sandbox hook, relaunch (one-shot)
   uninstall               remove ~/.local/bin symlink (keeps config)
   help [command]          this message, or detailed help
 
@@ -1814,6 +1818,82 @@ cmd_update() {
     git -C "$C3R_DIR" pull --ff-only
 }
 
+cmd_upgrade() {
+    load_config
+    local target; target="$(resolve_target "${1:-}")"
+    local state; state="$(require_state "$target")"
+
+    info "upgrading $target"
+    info "  1/4: pulling latest c3r"
+    git -C "$C3R_DIR" pull --ff-only --quiet || warn "  c3r pull failed (continuing)"
+
+    info "  2/4: stopping tmux session if running"
+    local session; session="c3r-$(python3 -c "import json;print(json.load(open('$state'))['project'])")"
+    tmux has-session -t "$session" 2>/dev/null && tmux kill-session -t "$session" 2>/dev/null && ok "  killed $session" || true
+
+    info "  3/4: re-rendering PROMPT.md, agent.conf, .claude/settings.json in each worktree"
+    python3 - "$state" "$C3R_DIR" <<'PY'
+import json, os, re, sys
+from pathlib import Path
+state_path, c3r_dir = sys.argv[1:]
+state = json.load(open(state_path))
+template = (Path(c3r_dir) / "templates" / "PROMPT_generic.md").read_text()
+sandbox = Path(c3r_dir) / "templates" / "claude_settings.json"
+
+# Build siblings list once
+all_names = [a["name"] for a in state["agents"] if a.get("status") != "stopped"]
+
+upgraded = 0
+for a in state["agents"]:
+    wt = Path(a["worktree"])
+    if not (wt / ".c3r").exists():
+        print(f"  skip {a['name']}: no .c3r dir")
+        continue
+    name = a["name"]; role = a.get("role", "generic"); focus = a.get("focus", "")
+    siblings = ",".join(n for n in all_names if n != name) or "(none)"
+    sib_up = siblings.upper().replace(",", "_").replace(" ", "") or "OTHERS"
+    reasons = "Three consecutive runs inconclusive\n- Fundamental reward/architecture redesign\n- Hardware constraint you cannot resolve"
+    rendered = (template
+        .replace("{{AGENT_NAME}}", name)
+        .replace("{{AGENT_ROLE}}", role)
+        .replace("{{FOCUS}}", focus)
+        .replace("{{SIBLINGS}}", siblings)
+        .replace("{{SIBLING_UPPER}}", sib_up)
+        .replace("{{SCOPE_OWN}}", "(agent-defined)")
+        .replace("{{SCOPE_NOT}}", "(sibling-owned)")
+        .replace("{{PING_BUDGET}}", "1")
+        .replace("{{PING_REASONS}}", reasons))
+    (wt / ".c3r/PROMPT.md").write_text(rendered)
+
+    # agent.conf: add ITERATION_TIMEOUT_SEC if missing
+    conf_path = wt / ".c3r/agent.conf"
+    if conf_path.exists():
+        conf = conf_path.read_text()
+        if "ITERATION_TIMEOUT_SEC" not in conf:
+            with conf_path.open("a") as f:
+                f.write('\n# Per-iteration wall-clock cap (added by c3r upgrade)\nITERATION_TIMEOUT_SEC=5400\n')
+
+    # .claude/settings.json: seed sandbox hook if missing
+    claude_dir = wt / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    cs = claude_dir / "settings.json"
+    if not cs.exists() or '"sandbox_check.py"' not in cs.read_text():
+        cs.write_text(sandbox.read_text())
+
+    upgraded += 1
+    print(f"  upgraded {name}: PROMPT + agent.conf + sandbox hook")
+
+print(f"\nupgraded {upgraded} worktree(s)")
+PY
+
+    info "  4/4: relaunching"
+    cmd_launch "$target"
+
+    ok "upgrade complete for $target"
+    info "  → c3r watch $target  (verify the new dashboard)"
+    info "  → !c3r status        (re-pin board in Discord, requires Manage Messages)"
+}
+
 cmd_listen() {
     load_config
     local target; target="$(resolve_target "${1:-}")"
@@ -1844,6 +1924,7 @@ case "$cmd" in
     kill)      cmd_kill      "$@" ;;
     reset)     cmd_reset     "$@" ;;
     update)    cmd_update    "$@" ;;
+    upgrade)   cmd_upgrade   "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     doctor)    cmd_doctor    "$@" ;;
     config)    cmd_config    "$@" ;;
