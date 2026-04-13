@@ -54,7 +54,16 @@ EOF
 #   4. git toplevel of $PWD
 resolve_target() {
     local arg="${1:-}"
-    if [ -n "$arg" ]; then cd "$arg" && pwd; return; fi
+    # Only treat $arg as a path if it looks like one (has a /, starts with .,
+    # ~, or is an existing directory). Otherwise it's an agent name etc.
+    # and we should fall through to the env/PWD resolution. This prevents
+    # `c3r ping policy "msg"` from spamming "cd: policy: No such file..."
+    if [ -n "$arg" ]; then
+        case "$arg" in
+            /*|./*|../*|~*) (cd "$arg" 2>/dev/null && pwd) && return ;;
+            *) [ -d "$arg" ] && (cd "$arg" 2>/dev/null && pwd) && return ;;
+        esac
+    fi
     if [ -n "${C3R_STATE:-}" ] && [ -f "$C3R_STATE" ]; then
         dirname "$(dirname "$C3R_STATE")"
         return
@@ -112,8 +121,8 @@ ${BOLD}RUNNING${RESET}
   attach [path]           attach to the running tmux session (alias: a)
   watch [path] [sec]      live dashboard (alias: w; default refresh 3s; q quits)
   stop [path]             kill the tmux session (non-destructive)
-  pause [path]            pause all agents cooperatively
-  resume [path]           resume paused agents
+  pause [agent] [path]    pause all agents, or one by name
+  resume [agent] [path]   resume all agents, or one by name
   status [path]           print local status + nudge Discord board
 
 ${BOLD}AGENT MANAGEMENT${RESET}
@@ -125,6 +134,8 @@ ${BOLD}AGENT MANAGEMENT${RESET}
 
 ${BOLD}HUMAN ↔ AGENT${RESET}
   ping [path] <agent> <msg>    send a message to an agent's INBOX
+  write [path]                 nudge all top-level agents to update their Quarto pages
+  fix [path] <task>            spawn an ephemeral fix-it agent for a one-shot task
   ask "question" [--choices]   send yourself a Discord question (test harness)
   listen [path]                 start the Discord → INBOX listener (auto-run by launch)
   board [path] (bump|update)    manage the persistent Discord status board
@@ -1242,7 +1253,7 @@ cmd_watch() {
     while :; do
         # Render a single screen to a buffer, then clear+print atomically
         local buf
-        buf="$(C3R_STATE="$state" C3R_INTERVAL="$interval" C3R_VERSION_STR="$C3R_VERSION" python3 - <<'PY'
+        buf="$(C3R_STATE="$state" C3R_INTERVAL="$interval" C3R_VERSION_STR="$C3R_VERSION" C3R_BIN="$C3R_BIN" python3 - <<'PY'
 import json, os, time
 from datetime import datetime, timezone
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
@@ -1367,14 +1378,21 @@ ENTRY_RE = re.compile(
     r'(?:\nRESP:\s*(.+?))?(?=\n---|\Z)',
     re.DOTALL,
 )
+TS_RE = re.compile(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC$')
 def parse_msgs(path, has_response):
     if not os.path.exists(path): return []
     out = []
     for m in ENTRY_RE.finditer(open(path).read()):
         ts, author, agent, msg, resp = m.groups()
+        ts_clean = ts.strip()
+        # Skip entries with malformed timestamps — they corrupt sort order.
+        if not TS_RE.match(ts_clean): continue
+        author_clean = author.strip()
+        # Skip system-injected messages so the user sees THEIR messages first.
+        if author_clean == "system": continue
         out.append({
-            "ts": ts.strip(),
-            "author": author.strip(),
+            "ts": ts_clean,
+            "author": author_clean,
             "agent": agent.strip(),
             "msg": " ".join(msg.strip().splitlines()),
             "resp": (resp or "").strip() if has_response else "",
@@ -1542,10 +1560,38 @@ cmd_stop() {
 }
 
 cmd_pause() {
+    # Check if first arg is an agent name (not a path)
+    local agent_name=""
+    if [ -n "${1:-}" ] && [[ ! "$1" =~ ^[/~.] ]] && [ ! -d "$1" ]; then
+        agent_name="$1"; shift
+    fi
     load_config
     local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
-    python3 - "$state" <<'PY'
+    if [ -n "$agent_name" ]; then
+        python3 - "$state" "$agent_name" <<'PY'
+import json, sys, pathlib
+state_path, agent_name = sys.argv[1], sys.argv[2]
+state = json.load(open(state_path))
+found = False
+for a in state["agents"]:
+    if a["name"] == agent_name:
+        pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").touch()
+        a["status"] = "paused"
+        found = True
+        break
+if not found:
+    names = ", ".join(a["name"] for a in state["agents"])
+    print(f"ERROR: no agent named '{agent_name}'. Available: {names}", file=sys.stderr)
+    sys.exit(1)
+if all(pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").exists() for a in state["agents"]):
+    state["paused"] = True
+json.dump(state, open(state_path, "w"), indent=2)
+PY
+        "$C3R_BIN/status_board.py" update --state "$state" || true
+        ok "agent '$agent_name' will pause after its current iteration"
+    else
+        python3 - "$state" <<'PY'
 import json, sys, pathlib
 state_path = sys.argv[1]
 state = json.load(open(state_path))
@@ -1554,26 +1600,59 @@ for a in state["agents"]:
 state["paused"] = True
 json.dump(state, open(state_path, "w"), indent=2)
 PY
-    "$C3R_BIN/status_board.py" update --state "$state" || true
-    ok "all agents will pause after their current iteration"
+        "$C3R_BIN/status_board.py" update --state "$state" || true
+        ok "all agents will pause after their current iteration"
+    fi
 }
 
 cmd_resume() {
+    # Check if first arg is an agent name (not a path)
+    local agent_name=""
+    if [ -n "${1:-}" ] && [[ ! "$1" =~ ^[/~.] ]] && [ ! -d "$1" ]; then
+        agent_name="$1"; shift
+    fi
     load_config
     local target; target="$(resolve_target "${1:-}")"
     local state; state="$(require_state "$target")"
-    python3 - "$state" <<'PY'
+    if [ -n "$agent_name" ]; then
+        python3 - "$state" "$agent_name" <<'PY'
+import json, sys, pathlib
+state_path, agent_name = sys.argv[1], sys.argv[2]
+state = json.load(open(state_path))
+found = False
+for a in state["agents"]:
+    if a["name"] == agent_name:
+        for flag in ("PAUSED", "PAUSED_QUOTA"):
+            try: pathlib.Path(a["worktree"]).joinpath(f".c3r/{flag}").unlink()
+            except FileNotFoundError: pass
+        a["status"] = "running"
+        found = True
+        break
+if not found:
+    names = ", ".join(a["name"] for a in state["agents"])
+    print(f"ERROR: no agent named '{agent_name}'. Available: {names}", file=sys.stderr)
+    sys.exit(1)
+state["paused"] = False
+json.dump(state, open(state_path, "w"), indent=2)
+PY
+        "$C3R_BIN/status_board.py" update --state "$state" || true
+        ok "agent '$agent_name' resumed"
+    else
+        python3 - "$state" <<'PY'
 import json, sys, pathlib
 state_path = sys.argv[1]
 state = json.load(open(state_path))
 for a in state["agents"]:
-    try: pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").unlink()
-    except FileNotFoundError: pass
+    for flag in ("PAUSED", "PAUSED_QUOTA"):
+        try: pathlib.Path(a["worktree"]).joinpath(f".c3r/{flag}").unlink()
+        except FileNotFoundError: pass
+    a["status"] = "running"
 state["paused"] = False
 json.dump(state, open(state_path, "w"), indent=2)
 PY
-    "$C3R_BIN/status_board.py" update --state "$state" || true
-    ok "agents resumed"
+        "$C3R_BIN/status_board.py" update --state "$state" || true
+        ok "agents resumed"
+    fi
 }
 
 cmd_status() {
@@ -1631,25 +1710,26 @@ cmd_ping() {
     local agent="${1:?usage: c3r ping [path] AGENT_NAME MESSAGE}"; shift
     local msg="$*"
     [ -n "$msg" ] || die "message required"
-    python3 - "$state" "$agent" "$msg" <<'PY'
+    python3 - "$state" "$agent" "$msg" "$C3R_BIN/notify.py" <<'PY'
 import json, sys, pathlib, os
 from datetime import datetime, timezone
-state_path, agent, msg = sys.argv[1:4]
+state_path, agent, msg, notify_bin = sys.argv[1:5]
 state = json.load(open(state_path))
 a = next((x for x in state["agents"] if x["name"] == agent), None)
 if not a: print(f"no such agent: {agent}", file=sys.stderr); raise SystemExit(1)
 inbox = pathlib.Path(a["worktree"]) / ".c3r/INBOX.md"
 inbox.parent.mkdir(parents=True, exist_ok=True)
 if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
-    inbox.write_text("# INBOX\n\n")
+    inbox.write_text("# INBOX\n")
 ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+one_line = " ".join(msg.splitlines()).strip()
 with inbox.open("a") as f:
-    f.write(f"\n---\n**you (cli)** · {ts}\n\n{msg}\n")
+    f.write(f"\n---\n[{ts}] you (cli) → {agent}\nMSG: {one_line}\n")
 print(f"delivered to {agent}")
 # Also post in the agent's Discord thread for symmetry
 if a.get("thread_id"):
     import subprocess
-    subprocess.run([f"{os.path.dirname(os.path.realpath(__file__))}/notify.py",
+    subprocess.run([notify_bin,
                     "--thread", a["thread_id"],
                     f"📨 **you (cli)**: {msg}"], check=False)
 PY
@@ -1775,10 +1855,10 @@ sp, name, role, model, focus, wt, parent = sys.argv[1:]
 parent = parent or None
 s = json.load(open(sp))
 token = os.environ["DISCORD_BOT_TOKEN"]; channel = s["channel_id"]
-# Descriptive thread title: "name · focus" (Discord cap 100 chars)
-# Root agents: "name · focus"; Children: "↳ name · focus" to visually mark subtasks.
+# Thread title is just the agent name (Discord cap 100 chars). Children
+# get a "↳ " prefix to visually mark them as sub-agents.
 prefix = "↳ " if parent else ""
-title = f"{prefix}{name} · {focus}"[:100]
+title = f"{prefix}{name}"[:100]
 req = urllib.request.Request(f"https://discord.com/api/v10/channels/{channel}/threads",
     data=json.dumps({"name": title, "type": 11, "auto_archive_duration": 10080}).encode(),
     method="POST")
@@ -1790,7 +1870,7 @@ with urllib.request.urlopen(req, timeout=30) as r:
 # Welcome message
 parent_line = f" · spawned by **{parent}**" if parent else ""
 wreq = urllib.request.Request(f"https://discord.com/api/v10/channels/{thread['id']}/messages",
-    data=json.dumps({"content": f"**{name}** — {role} · `{model}`{parent_line}\nFocus: {focus}\n\nReply here to send the agent an INBOX message."}).encode(),
+    data=json.dumps({"content": f"**{name}** — {role} · `{model}`{parent_line}\n\nReply here to send the agent an INBOX message."}).encode(),
     method="POST")
 wreq.add_header("Authorization", f"Bot {token}")
 wreq.add_header("Content-Type", "application/json")
@@ -1894,7 +1974,7 @@ sp, name = sys.argv[1:]
 s = json.load(open(sp))
 agent = next((a for a in s["agents"] if a["name"] == name), None)
 if not agent: sys.exit(0)
-is_sub = bool(agent.get("parent"))
+is_sub = bool(agent.get("parent")) or name == "quarto-fixer" or name.startswith("c3r-fix-") or name.startswith("fix-")
 agent["status"] = "stopped"
 thread_id = agent.get("thread_id")
 if thread_id:
@@ -1923,11 +2003,166 @@ if thread_id:
                         "--thread", thread_id,
                         "🛑 Agent stopped. Worktree and history preserved."],
                        check=False, cwd=os.path.dirname(os.path.realpath(__file__)))
+# Sub-agents: fully purge from state.json so they don't show in `c3r status`
+# or the !c3r status board. Worktree + branch are also removed (sub-agents
+# are ephemeral; their commits are already in main if they pushed anything
+# meaningful, and the parent agent owns the long-term work).
+import shutil, pathlib
+if is_sub:
+    wt = agent.get("worktree")
+    branch = agent.get("branch") or f"agent/{name}"
+    if wt:
+        # Find the project root (parent of state.json's parent dir)
+        proj_root = os.path.dirname(os.path.dirname(sp))
+        subprocess.run(["git", "-C", proj_root, "worktree", "remove", "--force", wt],
+                       check=False, capture_output=True)
+        subprocess.run(["git", "-C", proj_root, "branch", "-D", branch],
+                       check=False, capture_output=True)
+        if pathlib.Path(wt).exists():
+            shutil.rmtree(wt, ignore_errors=True)
+    s["agents"] = [a for a in s["agents"] if a["name"] != name]
+    print(f"[kill] purged sub-agent {name} from state.json + removed worktree/branch", file=sys.stderr)
 json.dump(s, open(sp, "w"), indent=2)
 PY
         ok "killed $agent"
     done
     "$C3R_BIN/status_board.py" update --state "$state" || true
+}
+
+cmd_write() {
+    # Nudge all top-level agents to update their Quarto pages, then mark
+    # the project as awaiting auto-rebuild. Mirrors `!c3r write`.
+    load_config
+    local target; target="$(resolve_target "${1:-}")"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+    python3 - "$state" <<'PY'
+import json, sys, time, pathlib
+from datetime import datetime, timezone
+sp = sys.argv[1]
+s = json.load(open(sp))
+targets = [a for a in s["agents"]
+           if not a.get("parent") and a.get("status") != "stopped"
+           and not a["name"].startswith("c3r-fix-")
+           and not a["name"].startswith("fix-")
+           and a["name"] != "quarto-fixer"]
+if not targets:
+    print("no top-level agents to nudge"); sys.exit(0)
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+msg = ("📝 WRITE NUDGE — please update your `agents/<name>.qmd` Quarto page "
+       "with your latest results, decisions, or figures before your next experiment. "
+       "Format reminder: see PROMPT.md 'Quarto report' section.")
+for a in targets:
+    inbox = pathlib.Path(a["worktree"]) / ".c3r/INBOX.md"
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
+        inbox.write_text("# INBOX\n")
+    with inbox.open("a") as f:
+        f.write(f"\n---\n[{ts}] you (cli) → {a['name']}\nMSG: {msg}\n")
+s["quarto_write_pending"] = {"nudge_ts": time.time(), "agents": [a["name"] for a in targets]}
+json.dump(s, open(sp, "w"), indent=2)
+print(f"nudged {len(targets)} agent(s): " + ", ".join(a["name"] for a in targets))
+print("(listener will auto-rebuild Quarto site once all have committed updates)")
+PY
+}
+
+cmd_fix() {
+    # Spawn an ephemeral fix-it agent. Mirrors `!c3r fix`.
+    load_config
+    local target; target="$(resolve_target "${1:-}")"
+    if [ -f "$target/.c3r/state.json" ]; then shift; else target="$PWD"; fi
+    local state; state="$(require_state "$target")"
+    local task="$*"
+    [ -n "$task" ] || die "usage: c3r fix [path] <task description>"
+    # Pick first non-stopword from the task; append -2,-3,... only if collision
+    local fixer_name
+    fixer_name=$(python3 - "$task" "$state" <<'PY'
+import json, re, subprocess, sys
+STOP = {"the","a","an","is","are","was","were","be","been","being","have","has","had",
+        "do","does","did","will","would","could","should","may","might","must","can",
+        "cannot","this","that","these","those","what","when","where","how","why","who",
+        "which","just","also","but","or","and","if","then","than","so","not","no","yes",
+        "very","really","still","again","here","there","seems","seem","my","your","our",
+        "their","its","it","you","i","we","they","them","us","me","please","thanks",
+        "thank","ok","okay","yeah","wait","actually","probably","maybe","perhaps",
+        "much","many","some","any","more","less","most","every","each","all","both",
+        "want","need","get","got","make","made","take","took","go","going","come","came",
+        "tell","said","know","think","feel","help","new","old","good","bad","big","small"}
+task = sys.argv[1]
+slug = None
+try:
+    r = subprocess.run(
+        ["claude", "-p", "--model", "claude-haiku-4-5",
+         f"Summarize this task in 2-3 hyphenated lowercase words for a "
+         f"filesystem-safe slug. The slug should describe what the task is "
+         f"ABOUT (the noun/topic), not the action verb. Return ONLY the slug "
+         f"— no quotes, no explanation, no punctuation other than hyphens. "
+         f"Examples: 'the search bar in quarto disappeared' -> quarto-search-bar; "
+         f"'remind perception of the goal' -> perception-goal-reminder. Task: {task}"],
+        capture_output=True, text=True, timeout=20,
+    )
+    cand = (r.stdout or "").strip().splitlines()[-1].strip().lower()
+    cand = re.sub(r'[^a-z0-9-]', '', cand).strip('-')
+    segs = [s for s in cand.split('-') if s]
+    if 2 <= len(segs) <= 4 and all(len(s) >= 2 for s in segs) and len(cand) <= 40:
+        slug = '-'.join(segs)
+except Exception as e:
+    print(f"[c3r fix] haiku slug failed: {e}", file=sys.stderr)
+if not slug:
+    words = re.findall(r'[a-zA-Z]+', task.lower())
+    good = [w for w in words if len(w) >= 4 and w not in STOP]
+    if len(good) >= 2:
+        slug = f"{good[0]}-{good[1]}"
+    elif good:
+        slug = good[0]
+    else:
+        slug = "task"
+existing = {a["name"] for a in json.load(open(sys.argv[2]))["agents"]}
+name = f"fix-{slug}"
+n = 2
+while name in existing:
+    name = f"fix-{slug}-{n}"
+    n += 1
+print(name)
+PY
+)
+    local short_focus="${task:0:80}"
+    local brief="🛠 ONE-SHOT TASK from human: $task
+
+**Talking to other agents**: if your task involves coordinating with perception/policy/etc., use \`\$C3R_BIN/../c3r ping <agent> \"**from $fixer_name**: <msg>\"\`. The \`**from $fixer_name**:\` prefix is REQUIRED — without it the listener drops the message as a self-post. This delivers to the target's INBOX so they actually read and reply on their next iter.
+
+You are an ephemeral fix-it agent. **Before self-killing**, post a NICELY FORMATTED summary to the MAIN CHANNEL using \`\$C3R_BIN/notify.py --main \"<message>\"\`. The message must use this exact markdown structure (multi-line, real newlines — pass with \$'\\n' or a heredoc):
+
+  ✅ **$fixer_name** — <one-line headline of what you accomplished>
+
+  **What I did**
+  - <action 1>
+  - <action 2>
+  - <action 3>
+
+  **Result**: <one-line outcome the human will care about>
+
+Keep it short and skimmable — the human may have missed your thread entirely. Do NOT include the verbatim task text or any of these instructions in your summary. Then call \`\$C3R_BIN/../c3r kill $fixer_name\` to self-purge. Max 10 iterations. Do not spawn sub-agents. Do not touch agent training scripts unless the task explicitly says so."
+    info "spawning ephemeral fix-it agent $fixer_name"
+    "$C3R_BIN/../c3r" spawn "$target" "$fixer_name" fix-it "$short_focus" --max-iters 10 || die "spawn failed"
+    # Inject brief directly into INBOX (no Discord echo — user already saw the spawn message)
+    python3 - "$state" "$fixer_name" "$brief" <<'PY'
+import json, sys, pathlib
+from datetime import datetime, timezone
+sp, name, msg = sys.argv[1:4]
+s = json.load(open(sp))
+a = next((x for x in s["agents"] if x["name"] == name), None)
+if not a: sys.exit(0)
+inbox = pathlib.Path(a["worktree"]) / ".c3r/INBOX.md"
+inbox.parent.mkdir(parents=True, exist_ok=True)
+if not inbox.exists() or "<!-- empty -->" in inbox.read_text():
+    inbox.write_text("# INBOX\n")
+ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+one_line = " ".join(msg.splitlines()).strip()
+with inbox.open("a") as f:
+    f.write(f"\n---\n[{ts}] you (cli) → {name}\nMSG: {one_line}\n")
+PY
+    ok "$fixer_name spawned and briefed — will self-purge on completion"
 }
 
 cmd_reset() {
@@ -1972,14 +2207,21 @@ cmd_update() {
 # ------------------------------------------------------------------
 
 cmd_report() {
-    local sub="${1:-}"; shift || true
+    local sub="${1:-}"
+    # Bare `c3r report` (or `c3r report <path>`) defaults to publish, matching
+    # the `!c3r report` Discord command. Explicit subcommands still work.
+    case "$sub" in
+        init|serve|build|publish|status|help|"") shift || true ;;
+        *) cmd_report_publish "$@"; return $? ;;
+    esac
     case "$sub" in
         init)    cmd_report_init    "$@" ;;
         serve)   cmd_report_serve   "$@" ;;
         build)   cmd_report_build   "$@" ;;
         publish) cmd_report_publish "$@" ;;
         status)  cmd_report_status  "$@" ;;
-        ""|help)
+        "")      cmd_report_publish "$@" ;;
+        help)
             cat <<'EOF'
 c3r report — agent-maintained Quarto site for the project
 
@@ -2064,16 +2306,15 @@ cmd_report_init() {
     _render_template "$QUARTO_TPL/index.qmd"    "$target/index.qmd" \
         PROJECT_TITLE "$project_title" \
         REPO_URL "$repo_url"
-    cp "$QUARTO_TPL/experiments.qmd"            "$target/experiments.qmd"
     cp "$QUARTO_TPL/references.qmd"             "$target/references.qmd"
     cp "$QUARTO_TPL/styles.css"                 "$target/styles.css"
 
     # Subdirectories with shared/ + per-agent subfolders so locations are obvious
-    mkdir -p "$target/agents" "$target/images/shared" "$target/videos/shared" "$target/experiments"
+    mkdir -p "$target/agents" "$target/images/shared" "$target/videos/shared" "$target/experiments" "$target/references"
     cp "$QUARTO_TPL/agents/index.qmd"           "$target/agents/index.qmd"
+    cp "$QUARTO_TPL/experiments.qmd"            "$target/experiments.qmd"
     cp "$QUARTO_TPL/images/README.md"           "$target/images/README.md"
     cp "$QUARTO_TPL/videos/README.md"           "$target/videos/README.md"
-    cp "$QUARTO_TPL/experiments/README.md"      "$target/experiments/README.md"
     touch "$target/images/shared/.gitkeep" "$target/videos/shared/.gitkeep"
 
     # Per-agent pages + per-agent media subfolders, one per active agent
@@ -2099,14 +2340,37 @@ for a in state.get("agents", []):
         out.write_text(page)
         created += 1
         print(f"  created agents/{name}.qmd", file=sys.stderr)
-    # Per-agent media folders
-    for sub in ("images", "videos"):
+    # Per-agent media + experiments folders (each agent gets their own
+    # subfolder so parallel branches don't conflict on shared files)
+    for sub in ("images", "videos", "experiments"):
         d = pathlib.Path(target) / sub / name
         d.mkdir(parents=True, exist_ok=True)
         keep = d / ".gitkeep"
         if not keep.exists():
             keep.write_text("")
-print(f"  seeded {created} agent page(s) + per-agent media subfolders", file=sys.stderr)
+    # Per-agent references file (template; agent appends entries)
+    refs_dir = pathlib.Path(target) / "references"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    refs_out = refs_dir / f"{name}.qmd"
+    if not refs_out.exists():
+        refs_tpl = pathlib.Path(target).parent / ".." / "c3r" / "templates" / "quarto" / "references" / "_template.qmd"
+        # Fall back to inlining if the template path doesn't resolve
+        if refs_tpl.exists():
+            refs_text = refs_tpl.read_text()
+        else:
+            refs_text = (
+                "---\ntitle: \"References — {{AGENT_NAME}}\"\n"
+                "description: \"Papers and prior work cited by the {{AGENT_NAME}} agent\"\n"
+                "date: today\nauthor: \"{{AGENT_NAME}} (c3r agent)\"\n---\n\n"
+                "Cited by **{{AGENT_NAME}}** during work on: *{{AGENT_FOCUS}}*. Newest first.\n\n"
+                "<!-- Append new entries above this line -->\n"
+            )
+        refs_out.write_text(
+            refs_text
+                .replace("{{AGENT_NAME}}", name)
+                .replace("{{AGENT_FOCUS}}", a.get("focus", "(no focus set)"))
+        )
+print(f"  seeded {created} agent page(s) + per-agent media/experiments/references subfolders", file=sys.stderr)
 PY
     fi
 
@@ -2208,7 +2472,7 @@ ${BOLD}Next steps:${RESET}
 
   4. ${DIM}# Commit + push${RESET}
      cd $target
-     git add _quarto.yml index.qmd agents/ experiments/ images/ videos/ references.qmd styles.css .github/ .gitignore
+     git add _quarto.yml index.qmd agents/ images/ videos/ references.qmd references/ experiments.qmd experiments/ styles.css .github/ .gitignore
      git commit -m "Add Quarto report site"
      git push
 
@@ -2261,7 +2525,8 @@ for a in state.get("agents", []):
     if a.get("status") == "stopped": continue
     name = a["name"]
     branch = f"agent/{name}"
-    for path in (f"agents/{name}.qmd",):
+    # Single-file pulls (per-agent .qmd pages)
+    for path in (f"agents/{name}.qmd", f"references/{name}.qmd"):
         out = pathlib.Path(target) / path
         out.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(["git", "-C", target, "show", f"{branch}:{path}"],
@@ -2269,8 +2534,8 @@ for a in state.get("agents", []):
         if r.returncode == 0:
             out.write_text(r.stdout)
             print(f"  pulled {path} from {branch}", file=sys.stderr)
-    # Also pull any per-agent images/videos that the agent committed
-    for sub in ("images", "videos"):
+    # Tree pulls (per-agent images, videos, experiments — anything under <sub>/<name>/)
+    for sub in ("images", "videos", "experiments"):
         r = subprocess.run(["git", "-C", target, "ls-tree", "-r", "--name-only",
                             branch, f"{sub}/{name}/"], capture_output=True, text=True)
         if r.returncode == 0:
@@ -2286,11 +2551,117 @@ PY
         # Read site URL + Discord channel for completion notification
         site_url=$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json')).get('quarto_site_url',''))" 2>/dev/null || true)
         channel_id=$(python3 -c "import json;print(json.load(open('$target/.c3r/state.json')).get('channel_id',''))" 2>/dev/null || true)
+
+        # Regenerate the navbar Agents menu from state.json so each active
+        # agent gets its own dropdown entry. Clicking "Agents" still goes
+        # to agents/index.qmd; the dropdown lists All agents + each one.
+        python3 - "$target/_quarto.yml" "$target/.c3r/state.json" <<'PY'
+import json, pathlib, sys
+yml_path, state_path = sys.argv[1:]
+state = json.load(open(state_path))
+agents = [a for a in state.get("agents", []) if a.get("status") != "stopped"]
+lines = pathlib.Path(yml_path).read_text().splitlines()
+try:
+    i_begin = next(i for i,l in enumerate(lines) if "AGENT_MENU_BEGIN" in l)
+    i_end = next(i for i,l in enumerate(lines) if "AGENT_MENU_END" in l)
+except StopIteration:
+    print("[publish] no AGENT_MENU markers in _quarto.yml — skipping regen", file=sys.stderr)
+    sys.exit(0)
+indent = " " * (len(lines[i_begin]) - len(lines[i_begin].lstrip()))
+new = [
+    f"{indent}# AGENT_MENU_BEGIN (auto-regenerated by `c3r report publish` from state.json)",
+    f"{indent}- href: agents/index.qmd",
+    f"{indent}  text: Agents",
+    f"{indent}  menu:",
+    f"{indent}    - href: agents/index.qmd",
+    f"{indent}      text: All agents",
+]
+for a in agents:
+    new.append(f"{indent}    - href: agents/{a['name']}.qmd")
+    new.append(f"{indent}      text: {a['name']}")
+new.append(f"{indent}# AGENT_MENU_END")
+out = lines[:i_begin] + new + lines[i_end+1:]
+pathlib.Path(yml_path).write_text("\n".join(out) + "\n")
+print(f"[publish] regenerated Agents menu with {len(agents)} entries", file=sys.stderr)
+PY
     fi
 
-    info "publishing to GitHub Pages..."
-    if (cd "$target" && quarto publish gh-pages --no-prompt 2>&1); then
-        ok "publish complete"
+    info "committing + pushing to trigger Pages workflow..."
+    # Capture the most recent run id BEFORE pushing so we can detect the
+    # NEW run that this push triggers (rather than `gh run watch` racing
+    # back to the previous run, which is still the latest until ~5s after push).
+    local prev_run_id=""
+    if command -v gh >/dev/null; then
+        prev_run_id=$(cd "$target" && gh run list --workflow=quarto-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+    fi
+
+    # Modern flow: GitHub Actions workflow renders + deploys on push to main.
+    # No `quarto publish gh-pages` (that requires a gh-pages branch we don't use).
+    if (cd "$target" \
+            && git add _quarto.yml index.qmd agents/ images/ videos/ references.qmd references/ experiments.qmd experiments/ styles.css .github/ .gitignore 2>/dev/null \
+            && (git diff --cached --quiet || git commit -m "c3r: rebuild Quarto site" >/dev/null) \
+            && git push 2>&1); then
+        # Wait for the NEW run (id != prev_run_id) to appear, then watch it
+        # specifically by id so we can't race onto the previous run.
+        info "waiting for new Pages workflow run to register..."
+        local new_run_id=""
+        if command -v gh >/dev/null; then
+            local waited=0
+            while [ "$waited" -lt 60 ]; do
+                new_run_id=$(cd "$target" && gh run list --workflow=quarto-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+                if [ -n "$new_run_id" ] && [ "$new_run_id" != "$prev_run_id" ]; then
+                    break
+                fi
+                sleep 3
+                waited=$((waited + 3))
+            done
+            if [ -z "$new_run_id" ] || [ "$new_run_id" = "$prev_run_id" ]; then
+                warn "no new workflow run detected within 60s — was there nothing to push?"
+                # Nothing was actually triggered (probably an empty commit). Treat as success.
+                ok "publish complete (no new workflow run; nothing to deploy)"
+                if [ -n "$channel_id" ] && [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+                    DISCORD_CHANNEL_ID="$channel_id" "$C3R_BIN/notify.py" \
+                        "✅ Quarto site already up to date${site_url:+ — $site_url}" >/dev/null 2>&1 || true
+                fi
+                return 0
+            fi
+            info "watching workflow run $new_run_id (gh run watch)..."
+        fi
+        if command -v gh >/dev/null && (cd "$target" && gh run watch "$new_run_id" --exit-status --interval 5 2>&1); then
+            ok "publish complete — site is live"
+        else
+            warn "Pages workflow did not finish successfully — spawning quarto-fixer"
+            # Capture the failed run id + tail of failed log so the fixer
+            # agent has concrete context, not just "it broke".
+            local failed_run_id failed_log
+            failed_run_id=$(cd "$target" && gh run list --workflow=quarto-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+            failed_log=$(cd "$target" && gh run view "$failed_run_id" --log-failed 2>&1 | tail -40 | tr '\n' ' ' | tr -s ' ' | head -c 1500)
+            if [ -n "$channel_id" ] && [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+                DISCORD_CHANNEL_ID="$channel_id" "$C3R_BIN/notify.py" \
+                    "⚠ Quarto Pages workflow failed (run $failed_run_id) — spawning **quarto-fixer** sub-agent" >/dev/null 2>&1 || true
+            fi
+            # Spawn (or re-ping) quarto-fixer. If it already exists, just
+            # append a new INBOX message rather than spawning a duplicate.
+            local already
+            already=$(python3 -c "
+import json
+s=json.load(open('$target/.c3r/state.json'))
+print(any(a['name']=='quarto-fixer' and a.get('status')!='stopped' for a in s['agents']))
+" 2>/dev/null)
+            # Short focus → clean Discord thread title. Full instructions go into the INBOX after spawn.
+            local fixer_focus="Fix failed Pages build (run $failed_run_id)"
+            local fixer_brief="🛠 Quarto build failed (run $failed_run_id). At the TOP of every iteration: run \`gh run list --workflow=quarto-publish.yml --limit 1 --json conclusion --jq '.[0].conclusion'\`. If 'success', call \`\$C3R_BIN/c3r kill quarto-fixer\` immediately and exit. Otherwise read \`gh run view <id> --log-failed\`, fix the issue (likely _quarto.yml render scope, missing files, or workflow YAML), commit + push, wait ~60s, loop. Do not touch agent code or training scripts. Do not spawn sub-agents. Max 10 iterations. Failed log tail: $failed_log"
+            if [ "$already" = "True" ]; then
+                info "quarto-fixer already running — appending new failure context to its inbox"
+                "$C3R_BIN/../c3r" ping "$target" quarto-fixer "$fixer_brief" >/dev/null 2>&1 || true
+            else
+                info "spawning quarto-fixer (max 10 iters, self-kills on green build)"
+                "$C3R_BIN/../c3r" spawn "$target" quarto-fixer quarto-fixer "$fixer_focus" --max-iters 10 >/dev/null 2>&1 || warn "quarto-fixer spawn failed"
+                # Inject the full instructions via INBOX so the agent has them on iter 1.
+                "$C3R_BIN/../c3r" ping "$target" quarto-fixer "$fixer_brief" >/dev/null 2>&1 || true
+            fi
+            return 1
+        fi
         # Post a completion notification to the project's Discord channel
         if [ -n "$channel_id" ] && [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
             local msg
@@ -2375,12 +2746,12 @@ for a in s["agents"]:
     if a.get("status") != "stopped":
         pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").touch()
 PY
-        ok "  PAUSE flag set; waiting up to 90s for agents to enter paused state"
+        ok "  PAUSE flag set; waiting up to 30s for agents to enter paused state"
 
-        # Poll status.json for up to 90 seconds, looking for all active
+        # Poll status.json for up to 30 seconds, looking for all active
         # agents to be in 'paused' or 'idle' state (i.e. not 'running')
         local waited=0
-        while [ "$waited" -lt 90 ]; do
+        while [ "$waited" -lt 30 ]; do
             local still_running
             still_running=$(python3 - "$state" <<'PY'
 import json, sys
@@ -2400,8 +2771,8 @@ PY
             waited=$((waited + 5))
         done
         echo
-        if [ "$waited" -ge 90 ]; then
-            warn "  90s timeout reached; some agents may still be mid-iteration. Killing anyway."
+        if [ "$waited" -ge 30 ]; then
+            warn "  30s timeout reached; some agents may still be mid-iteration. Killing anyway."
         fi
 
         info "  3/5: stopping tmux session"
@@ -2498,8 +2869,10 @@ PY
 import json, sys, pathlib
 s = json.load(open(sys.argv[1]))
 for a in s["agents"]:
-    try: pathlib.Path(a["worktree"]).joinpath(".c3r/PAUSED").unlink()
-    except FileNotFoundError: pass
+    for flag in ("PAUSED", "PAUSED_QUOTA"):
+        try: pathlib.Path(a["worktree"]).joinpath(f".c3r/{flag}").unlink()
+        except FileNotFoundError: pass
+    a["status"] = "running"
 s["paused"] = False
 json.dump(s, open(sys.argv[1], "w"), indent=2)
 PY
@@ -2551,6 +2924,8 @@ case "$cmd" in
     install)   cmd_install   "$@" ;;
     board)     cmd_board     "$@" ;;
     listen)    cmd_listen    "$@" ;;
+    write)     cmd_write     "$@" ;;
+    fix)       cmd_fix       "$@" ;;
     usage-auth) cmd_usage_auth "$@" ;;
     help|-h|--help) cmd_help "$@" ;;
     *) cmd_help; die "unknown command: $cmd" ;;
